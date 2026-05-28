@@ -1,0 +1,20 @@
+FROM hermes-core:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Node.js 22 LTS
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Playwright dependencies (system libraries for Chromium)
+RUN npx playwright install-deps chromium
+
+# Install Playwright Chromium browser
+RUN npx playwright install chromium
+
+# Install agent-browser package (used by hermes-agent for browser tools)
+WORKDIR /opt/hermes/hermes-agent
+RUN npm install
+
+WORKDIR /opt/hermes

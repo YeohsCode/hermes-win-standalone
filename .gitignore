@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+target/
+
+# Build outputs
+dist/
+build/
+*.tar.gz
+*.exe
+*.msi
+
+# Tauri
+tauri-app/src-tauri/target/
+tauri-app/src-tauri/WixTools/
+tauri-app/src-tauri/icons/
+
+# WSL distro build artifacts
+wsl-distro/output/
+wsl-distro/*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log

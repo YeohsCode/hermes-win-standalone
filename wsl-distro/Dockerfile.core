@@ -1,0 +1,59 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HERMES_HOME=/root/.hermes
+ENV PATH="/opt/hermes/venv/bin:/root/.local/bin:${PATH}"
+
+# System dependencies (Ubuntu 24.04 ships Python 3.12, compatible with hermes-agent 3.11+)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-venv \
+    python3-dev \
+    python3-pip \
+    git \
+    ripgrep \
+    ca-certificates \
+    curl \
+    wget \
+    bash \
+    openssh-client \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ensure python3 is accessible as python
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create hermes directories
+RUN mkdir -p /opt/hermes/venv /opt/hermes/scripts ${HERMES_HOME}
+
+# Copy hermes-agent source
+COPY hermes-agent /opt/hermes/hermes-agent
+
+# Create venv and install hermes-agent with [all,web] extras
+WORKDIR /opt/hermes/hermes-agent
+RUN uv venv /opt/hermes/venv && \
+    uv pip install --python /opt/hermes/venv/bin/python -e ".[all,web]"
+
+# Copy hermes-webui source
+COPY hermes-webui /opt/hermes/hermes-webui
+
+# Install hermes-webui dependencies
+RUN uv pip install --python /opt/hermes/venv/bin/python \
+    -r /opt/hermes/hermes-webui/requirements.txt
+
+# Copy service management scripts
+COPY scripts/ /opt/hermes/scripts/
+RUN chmod +x /opt/hermes/scripts/*.sh
+
+# Configure default environment for hermes-webui
+RUN echo 'export PATH="/opt/hermes/venv/bin:/root/.local/bin:${PATH}"' >> /root/.bashrc && \
+    echo 'export HERMES_HOME=/root/.hermes' >> /root/.bashrc && \
+    echo 'export HERMES_WEBUI_AGENT_DIR=/opt/hermes/hermes-agent' >> /root/.bashrc
+
+# Create default config directory
+RUN mkdir -p ${HERMES_HOME}/sessions ${HERMES_HOME}/skills ${HERMES_HOME}/logs
+
+WORKDIR /opt/hermes

@@ -1,0 +1,222 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+
+env:
+  AGENT_VERSION: "v2026.4.16"
+  WEBUI_VERSION: "v0.50.76"
+
+jobs:
+  build-rootfs:
+    name: Build WSL2 Rootfs Layers
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        layer: [core, browser, voice, messaging]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download hermes-agent source
+        run: |
+          wget -q "https://github.com/NousResearch/hermes-agent/archive/refs/tags/${{ env.AGENT_VERSION }}.tar.gz" -O agent.tar.gz
+          mkdir -p wsl-distro/.build-context
+          tar xzf agent.tar.gz -C wsl-distro/.build-context
+          mv wsl-distro/.build-context/hermes-agent-* wsl-distro/.build-context/hermes-agent
+
+      - name: Download hermes-webui source
+        run: |
+          wget -q "https://github.com/nesquena/hermes-webui/archive/refs/tags/${{ env.WEBUI_VERSION }}.tar.gz" -O webui.tar.gz
+          mkdir -p wsl-distro/.build-context
+          tar xzf webui.tar.gz -C wsl-distro/.build-context
+          mv wsl-distro/.build-context/hermes-webui-* wsl-distro/.build-context/hermes-webui
+
+      - name: Copy scripts to build context
+        run: cp -r wsl-distro/scripts wsl-distro/.build-context/scripts
+
+      - name: Build core image
+        if: matrix.layer == 'core'
+        run: |
+          docker build \
+            -f wsl-distro/Dockerfile.core \
+            -t hermes-core:latest \
+            wsl-distro/.build-context
+
+      - name: Build core image (dependency for other layers)
+        if: matrix.layer != 'core'
+        run: |
+          docker build \
+            -f wsl-distro/Dockerfile.core \
+            -t hermes-core:latest \
+            wsl-distro/.build-context
+
+      - name: Build layer image
+        if: matrix.layer != 'core'
+        run: |
+          docker build \
+            -f wsl-distro/Dockerfile.${{ matrix.layer }} \
+            -t hermes-${{ matrix.layer }}:latest \
+            wsl-distro/.build-context
+
+      - name: Export core rootfs
+        if: matrix.layer == 'core'
+        run: |
+          mkdir -p output
+          CONTAINER_ID=$(docker create hermes-core:latest)
+          docker export $CONTAINER_ID | gzip > output/rootfs-core.tar.gz
+          docker rm $CONTAINER_ID
+          ls -lh output/rootfs-core.tar.gz
+
+      - name: Export layer
+        if: matrix.layer != 'core'
+        run: |
+          mkdir -p output
+          CONTAINER_ID=$(docker create hermes-${{ matrix.layer }}:latest)
+          docker export $CONTAINER_ID | gzip > output/layer-${{ matrix.layer }}.tar.gz
+          docker rm $CONTAINER_ID
+          ls -lh output/layer-${{ matrix.layer }}.tar.gz
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.layer }}
+          path: output/*.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  build-tauri:
+    name: Build Tauri App
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'tauri-app/src-tauri -> target'
+
+      - name: Generate icons
+        shell: bash
+        run: bash scripts/generate-icons.sh
+
+      - name: Install frontend dependencies
+        working-directory: tauri-app
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: tauri-app
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+
+      - name: Upload Tauri artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-app
+          path: tauri-app/src-tauri/target/release/Hermes.exe
+          retention-days: 1
+
+  package-installer:
+    name: Package Installer
+    runs-on: windows-latest
+    needs: [build-rootfs, build-tauri]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all rootfs artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rootfs-*
+          path: wsl-distro/output
+          merge-multiple: true
+
+      - name: Download Tauri app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-app
+          path: tauri-app/src-tauri/target/release
+
+      - name: List artifacts
+        run: |
+          echo "=== Rootfs artifacts ==="
+          dir wsl-distro\output
+          echo "=== Tauri artifact ==="
+          dir tauri-app\src-tauri\target\release\Hermes.exe
+
+      - name: Build installer with Inno Setup
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
+        with:
+          path: installer/hermes-win.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-installer
+          path: build/HermesSetup-*.exe
+          retention-days: 7
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [package-installer]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: hermes-installer
+          path: release
+
+      - name: Download individual rootfs layers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rootfs-*
+          path: release/layers
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Hermes ${{ github.ref_name }}"
+          body: |
+            ## Hermes Windows Standalone ${{ github.ref_name }}
+
+            ### Downloads
+
+            - **HermesSetup-*.exe** — Full installer (includes all components, select during install)
+            - **rootfs-core.tar.gz** — Core layer only (for manual WSL import)
+            - **layer-browser.tar.gz** — Browser automation add-on
+            - **layer-voice.tar.gz** — Voice/speech add-on
+            - **layer-messaging.tar.gz** — Messaging platforms add-on
+
+            ### System Requirements
+
+            - Windows 11 (or Windows 10 2004+)
+            - WSL2 enabled (installer will guide you)
+            - 4GB+ disk space (core), 8GB+ (full)
+          files: |
+            release/HermesSetup-*.exe
+            release/layers/*.tar.gz
+          draft: false
+          prerelease: false

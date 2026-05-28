@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-check:
+    name: Lint & Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Dockerfile syntax
+        run: |
+          docker run --rm -i hadolint/hadolint < wsl-distro/Dockerfile.core || true
+
+      - name: Check shell scripts
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck wsl-distro/scripts/*.sh || true
+
+  build-tauri-check:
+    name: Tauri Build Check
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'tauri-app/src-tauri -> target'
+
+      - name: Generate icons
+        shell: bash
+        run: bash scripts/generate-icons.sh
+
+      - name: Install frontend dependencies
+        working-directory: tauri-app
+        run: npm ci
+
+      - name: Type check frontend
+        working-directory: tauri-app
+        run: npx tsc --noEmit
+
+      - name: Check Rust compilation
+        working-directory: tauri-app/src-tauri
+        run: cargo check

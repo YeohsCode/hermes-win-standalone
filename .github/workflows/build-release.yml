@@ -91,6 +91,7 @@ jobs:
           path: output/*.tar.gz
           retention-days: 1
           compression-level: 0
+          if-no-files-found: error
 
   build-tauri:
     name: Build Tauri App
@@ -130,8 +131,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tauri-app
-          path: tauri-app/src-tauri/target/release/Hermes.exe
+          path: tauri-app/src-tauri/target/release/hermes-desktop.exe
           retention-days: 1
+          if-no-files-found: error
 
   package-installer:
     name: Package Installer
@@ -160,7 +162,7 @@ jobs:
           echo "=== Rootfs artifacts ==="
           dir wsl-distro\output
           echo "=== Tauri artifact ==="
-          dir tauri-app\src-tauri\target\release\Hermes.exe
+          dir tauri-app\src-tauri\target\release\hermes-desktop.exe
 
       - name: Build installer with Inno Setup
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.4

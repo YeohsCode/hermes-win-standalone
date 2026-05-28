@@ -5,7 +5,7 @@
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Hermes"
 #define MyAppURL "https://github.com/YeohsCode/hermes-win-standalone"
-#define MyAppExeName "Hermes.exe"
+#define MyAppExeName "hermes-desktop.exe"
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -43,7 +43,7 @@ Name: "messaging"; Description: "Messaging Platforms (Telegram, Discord, Slack, 
 
 [Files]
 ; Tauri application
-Source: "..\tauri-app\src-tauri\target\release\Hermes.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\tauri-app\src-tauri\target\release\hermes-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Core WSL rootfs
 Source: "..\wsl-distro\output\rootfs-core.tar.gz"; DestDir: "{app}\wsl"; Components: core; Flags: ignoreversion
 ; Optional layers

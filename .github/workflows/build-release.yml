@@ -164,6 +164,18 @@ jobs:
           echo "=== Tauri artifact ==="
           dir tauri-app\src-tauri\target\release\hermes-desktop.exe
 
+      # ChineseSimplified.isl is an "unofficial" translation not bundled with Inno Setup.
+      # The runner image only ships official languages, so download it from jrsoftware.org
+      # into the compiler's Languages directory before compiling.
+      - name: Install ChineseSimplified language file
+        shell: pwsh
+        run: |
+          $dest = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          $url  = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
+          Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+          if (-not (Test-Path $dest)) { throw "Failed to download ChineseSimplified.isl" }
+          Write-Host "Installed: $dest ($((Get-Item $dest).Length) bytes)"
+
       - name: Build installer with Inno Setup
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
         with:

@@ -16,6 +16,12 @@ LAYER_IMAGE="${1:?layer image required (e.g. hermes-browser:latest)}"
 CORE_IMAGE="${2:?core image required (e.g. hermes-core:latest)}"
 OUTPUT="${3:?output path required (e.g. output/layer-browser.tar.gz)}"
 
+# Resolve OUTPUT to an absolute path immediately — the script will cd later,
+# and a relative path would break. Do this BEFORE mktemp/cd/anything else.
+mkdir -p "$(dirname "${OUTPUT}")"
+OUTPUT="$(cd "$(dirname "${OUTPUT}")" && pwd)/$(basename "${OUTPUT}")"
+echo "Output path: ${OUTPUT}" >&2
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
@@ -70,11 +76,6 @@ print(f"  pruned {removed_files} files, {removed_bytes/1024/1024:.1f} MiB", file
 PYEOF
 
 echo "Tarring delta..." >&2
-# Resolve OUTPUT to an absolute path BEFORE cd'ing into the work dir — otherwise
-# a relative path like "output/layer-voice.tar.gz" would resolve against
-# ${WORKDIR}/full and tar would fail with "Cannot open: No such file".
-mkdir -p "$(dirname "${OUTPUT}")"
-OUTPUT="$(cd "$(dirname "${OUTPUT}")" && pwd)/$(basename "${OUTPUT}")"
 cd "${WORKDIR}/full"
 tar czf "${OUTPUT}" .
 cd - >/dev/null

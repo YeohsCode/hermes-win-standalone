@@ -4,17 +4,24 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Node.js 22 LTS
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Install Playwright dependencies (system libraries for Chromium)
-RUN npx playwright install-deps chromium
+# Install Playwright system dependencies for Chromium
+# (apt-get update happens inside playwright install-deps; clean up after)
+RUN npx --yes playwright install-deps chromium && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Install Playwright Chromium browser
-RUN npx playwright install chromium
+# Install Playwright Chromium browser only (not Firefox/WebKit)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/playwright
+RUN npx --yes playwright install chromium
 
-# Install agent-browser package (used by hermes-agent for browser tools)
+# Install agent-browser npm dependencies (production only)
 WORKDIR /opt/hermes/hermes-agent
-RUN npm install
+RUN npm install --omit=dev --no-audit --no-fund && \
+    npm cache clean --force && \
+    rm -rf /root/.npm /tmp/* /var/tmp/*
 
 WORKDIR /opt/hermes

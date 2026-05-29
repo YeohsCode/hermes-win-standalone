@@ -32,10 +32,20 @@ RUN mkdir -p /opt/hermes/venv /opt/hermes/scripts ${HERMES_HOME}
 # Copy hermes-agent source
 COPY hermes-agent /opt/hermes/hermes-agent
 
-# Create venv and install hermes-agent with [all,web] extras
+# Create venv and install hermes-agent. We install [all,web] PLUS the extras
+# that v0.15.x policy moved out of [all] into lazy-install at first use:
+#   anthropic, exa, firecrawl, parallel-web, fal, edge-tts.
+# Standalone Windows installs MUST work fully offline — `tools/lazy_deps.py`
+# would call out to PyPI on first use of each backend, breaking the offline
+# guarantee and failing on locked-down corporate networks. Eager-installing
+# these here trades ~30MB of layer size for a working out-of-the-box product.
+# Reference: pyproject.toml comment dated 2026-05-12 ("Removed from [all] on
+# 2026-05-12 (covered by lazy-install): anthropic, exa, firecrawl, ...").
+# Excluded here on purpose: tts-premium (elevenlabs) lives in the voice layer,
+# voice (faster-whisper + onnxruntime, ~400MB) likewise.
 WORKDIR /opt/hermes/hermes-agent
 RUN uv venv /opt/hermes/venv && \
-    uv pip install --python /opt/hermes/venv/bin/python -e ".[all,web]"
+    uv pip install --python /opt/hermes/venv/bin/python -e ".[all,web,anthropic,exa,firecrawl,parallel-web,fal,edge-tts]"
 
 # Copy hermes-webui source
 COPY hermes-webui /opt/hermes/hermes-webui
@@ -55,5 +65,15 @@ RUN echo 'export PATH="/opt/hermes/venv/bin:/root/.local/bin:${PATH}"' >> /root/
 
 # Create default config directory
 RUN mkdir -p ${HERMES_HOME}/sessions ${HERMES_HOME}/skills ${HERMES_HOME}/logs
+
+# Strip caches and docs to reduce rootfs size. This must run in core (not in
+# downstream layers) so the bytes never enter any image — once a file lands in
+# core, no amount of `rm` in browser/voice/messaging will reduce layer size.
+RUN find / -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true && \
+    find / -type f -name '*.pyc' -delete 2>/dev/null || true && \
+    rm -rf /root/.cache/pip /root/.cache/uv /tmp/* /var/tmp/* && \
+    rm -rf /usr/share/doc /usr/share/man \
+           /usr/share/locale/[a-d]* /usr/share/locale/[e-l]* \
+           /usr/share/locale/[m-r]* /usr/share/locale/[s-z]*
 
 WORKDIR /opt/hermes

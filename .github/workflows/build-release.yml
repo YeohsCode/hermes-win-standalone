@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 env:
-  AGENT_VERSION: "v2026.4.16"
+  AGENT_VERSION: "v2026.5.29"
   WEBUI_VERSION: "v0.50.76"
 
 jobs:
@@ -75,14 +75,14 @@ jobs:
           docker rm $CONTAINER_ID
           ls -lh output/rootfs-core.tar.gz
 
-      - name: Export layer
+      - name: Export layer (differential against core)
         if: matrix.layer != 'core'
         run: |
           mkdir -p output
-          CONTAINER_ID=$(docker create hermes-${{ matrix.layer }}:latest)
-          docker export $CONTAINER_ID | gzip > output/layer-${{ matrix.layer }}.tar.gz
-          docker rm $CONTAINER_ID
-          ls -lh output/layer-${{ matrix.layer }}.tar.gz
+          bash wsl-distro/export-differential-layer.sh \
+            "hermes-${{ matrix.layer }}:latest" \
+            "hermes-core:latest" \
+            "output/layer-${{ matrix.layer }}.tar.gz"
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4

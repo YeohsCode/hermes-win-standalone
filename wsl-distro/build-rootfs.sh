@@ -65,32 +65,10 @@ build_layer() {
         -t "hermes-${name}:latest" \
         "${SCRIPT_DIR}/.build-context"
 
-    echo "Extracting ${name} layer delta..."
-    # Export both images and compute the diff
-    local core_id full_id
-    core_id=$(docker create hermes-core:latest)
-    full_id=$(docker create "hermes-${name}:latest")
-
-    # Export full image, then extract only files that differ from core
-    docker export "${full_id}" > "${OUTPUT_DIR}/.full-${name}.tar"
-    docker export "${core_id}" > "${OUTPUT_DIR}/.core-${name}.tar"
-
-    # Create delta: files in full that aren't in core (by content)
-    mkdir -p "${OUTPUT_DIR}/.diff-${name}"
-    tar xf "${OUTPUT_DIR}/.full-${name}.tar" -C "${OUTPUT_DIR}/.diff-${name}"
-
-    # Use a simple approach: tar the full layer (not truly differential,
-    # but reliable). Users can install it as overlay.
-    cd "${OUTPUT_DIR}/.diff-${name}"
-    tar czf "${OUTPUT_DIR}/layer-${name}.tar.gz" .
-    cd "${SCRIPT_DIR}"
-
-    # Cleanup
-    rm -rf "${OUTPUT_DIR}/.full-${name}.tar" "${OUTPUT_DIR}/.core-${name}.tar" "${OUTPUT_DIR}/.diff-${name}"
-    docker rm "${core_id}" "${full_id}" > /dev/null
-
-    echo "${name} layer: ${OUTPUT_DIR}/layer-${name}.tar.gz"
-    ls -lh "${OUTPUT_DIR}/layer-${name}.tar.gz"
+    "${SCRIPT_DIR}/export-differential-layer.sh" \
+        "hermes-${name}:latest" \
+        "hermes-core:latest" \
+        "${OUTPUT_DIR}/layer-${name}.tar.gz"
 }
 
 cleanup_context() {

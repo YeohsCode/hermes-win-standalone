@@ -2,30 +2,24 @@ FROM hermes-core:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install all messaging platform dependencies
+# Install messaging-platform extras via the agent's own extras (single source
+# of truth for versions/transitives — see hermes-agent pyproject.toml):
+#   [messaging]      -> python-telegram-bot + discord.py + aiohttp + brotlicffi
+#                       + slack-bolt + slack-sdk + qrcode
+#   [dingtalk]       -> dingtalk-stream + alibabacloud-dingtalk + qrcode
+#   [feishu]         -> lark-oapi + qrcode
+#   [wecom]          -> defusedxml (WeCom callback adapter)
+#   [bedrock]        -> boto3 (AWS Bedrock provider)
+#   [azure-identity] -> azure-identity (Azure provider auth)
+# Note: anthropic and the web-search backends (exa/firecrawl/parallel-web/fal)
+# moved into the core layer, so they are no longer installed here.
+WORKDIR /opt/hermes/hermes-agent
 RUN uv pip install --python /opt/hermes/venv/bin/python \
-    "python-telegram-bot[webhooks]==22.6" \
-    "discord.py[voice]==2.7.1" \
-    "aiohttp==3.13.3" \
-    "brotlicffi==1.2.0.1" \
-    "slack-bolt==1.27.0" \
-    "slack-sdk==3.40.1" \
-    "qrcode==7.4.2" \
-    "dingtalk-stream==0.24.3" \
-    "alibabacloud-dingtalk==2.2.42" \
-    "lark-oapi==1.5.3"
+    -e ".[messaging,dingtalk,feishu,wecom,bedrock,azure-identity]"
 
-# Install cloud provider SDKs
-RUN uv pip install --python /opt/hermes/venv/bin/python \
-    "anthropic==0.86.0" \
-    "boto3==1.42.89" \
-    "azure-identity==1.25.3"
-
-# Install web search backends
-RUN uv pip install --python /opt/hermes/venv/bin/python \
-    "exa-py==2.10.2" \
-    "firecrawl-py==4.17.0" \
-    "parallel-web==0.4.2" \
-    "fal-client==0.13.1"
+# Strip caches and bytecode introduced by this layer
+RUN find /opt/hermes/venv -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true && \
+    find /opt/hermes/venv -type f -name '*.pyc' -delete 2>/dev/null || true && \
+    rm -rf /root/.cache/pip /root/.cache/uv /tmp/* /var/tmp/*
 
 WORKDIR /opt/hermes

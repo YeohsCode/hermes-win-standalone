@@ -11,7 +11,7 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let menu = Menu::with_items(app, &[&show, &restart, &quit])?;
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id("main")
         .menu(&menu)
         .tooltip("Hermes AI Agent")
         .on_menu_event(move |app, event| match event.id.as_ref() {

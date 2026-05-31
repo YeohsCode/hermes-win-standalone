@@ -28,7 +28,8 @@
       "iconAsTemplate": false
     },
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:* ws://localhost:*; frame-src http://localhost:*; style-src 'self' 'unsafe-inline'"
+      "csp": null,
+      "dangerousDisableAssetCspModification": true
     }
   },
   "bundle": {

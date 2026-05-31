@@ -1,31 +1,57 @@
+type SetupReason = "wsl_missing" | "distro_missing";
+
 interface SetupProps {
+  reason: SetupReason;
   onRetry: () => void;
 }
 
-function Setup({ onRetry }: SetupProps) {
+function Setup({ reason, onRetry }: SetupProps) {
   return (
     <div style={styles.container}>
       <div style={styles.card}>
-        <h1 style={styles.title}>需要启用 WSL2</h1>
-        <p style={styles.description}>
-          Hermes 需要 Windows Subsystem for Linux 2 (WSL2) 来运行。
-          请按照以下步骤启用：
-        </p>
-        <ol style={styles.steps}>
-          <li style={styles.step}>
-            以管理员身份打开 PowerShell
-          </li>
-          <li style={styles.step}>
-            运行命令：
-            <code style={styles.code}>wsl --install</code>
-          </li>
-          <li style={styles.step}>
-            重启计算机
-          </li>
-          <li style={styles.step}>
-            重新打开 Hermes
-          </li>
-        </ol>
+        {reason === "wsl_missing" ? (
+          <>
+            <h1 style={styles.title}>需要启用 WSL2</h1>
+            <p style={styles.description}>
+              Hermes 需要 Windows Subsystem for Linux 2 (WSL2) 来运行。
+              请按照以下步骤启用：
+            </p>
+            <ol style={styles.steps}>
+              <li style={styles.step}>
+                以管理员身份打开 PowerShell
+              </li>
+              <li style={styles.step}>
+                运行命令：
+                <code style={styles.code}>wsl --install</code>
+              </li>
+              <li style={styles.step}>
+                重启计算机
+              </li>
+              <li style={styles.step}>
+                重新打开 Hermes
+              </li>
+            </ol>
+          </>
+        ) : (
+          <>
+            <h1 style={styles.title}>HermesLinux 未安装</h1>
+            <p style={styles.description}>
+              WSL2 已启用，但 HermesLinux 发行版未找到。
+              请重新运行 Hermes 安装程序以导入系统环境。
+            </p>
+            <ol style={styles.steps}>
+              <li style={styles.step}>
+                重新运行 HermesSetup 安装程序
+              </li>
+              <li style={styles.step}>
+                确保安装过程中无错误提示
+              </li>
+              <li style={styles.step}>
+                安装完成后重新打开 Hermes
+              </li>
+            </ol>
+          </>
+        )}
         <button style={styles.retryBtn} onClick={onRetry}>
           我已完成，重新检测
         </button>

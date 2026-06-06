@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 env:
-  AGENT_VERSION: "v2026.5.29"
+  AGENT_VERSION: "v2026.5.29.2"
   WEBUI_VERSION: "v0.50.76"
 
 jobs:

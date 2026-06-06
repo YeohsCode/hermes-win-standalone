@@ -65,8 +65,6 @@ Name: "autostart"; Description: "Start Hermes at Windows login"; GroupDescriptio
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Hermes"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\check-wsl2.ps1"""; StatusMsg: "Checking WSL2 status..."; Flags: runhidden
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\import-distro.ps1"" -InstallDir ""{app}"""; StatusMsg: "Setting up HermesLinux environment..."; Flags: runhidden
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Hermes"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -76,10 +74,29 @@ Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\s
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
+  WslReady: Boolean;
 begin
   Result := True;
-  // Check if WSL2 is available
-  if not Exec('wsl', '--version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  WslReady := False;
+
+  // wsl --status works on both inbox WSL (Win10) and Store WSL (Win11).
+  if Exec('wsl', '--status', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode = 0 then
+      WslReady := True;
+  end;
+
+  // Fallback: wsl --list succeeds if WSL is functional at all
+  if not WslReady then
+  begin
+    if Exec('wsl', '--list --quiet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      if ResultCode = 0 then
+        WslReady := True;
+    end;
+  end;
+
+  if not WslReady then
   begin
     if MsgBox('WSL2 is not enabled on this system.' + #13#10 + #13#10 +
               'Hermes requires WSL2 to run. Would you like to enable it now?' + #13#10 +
@@ -93,6 +110,58 @@ begin
     end else
     begin
       Result := False;
+    end;
+  end;
+end;
+
+// Post-install: run WSL2 check and distro import with proper error handling.
+// Using CurStepChanged instead of [Run] so we can abort import if check fails.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    // Step 1: Ensure WSL2 features are enabled and configured
+    WizardForm.StatusLabel.Caption := 'Checking WSL2 status...';
+    if not Exec('powershell.exe',
+                '-ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\scripts\check-wsl2.ps1"',
+                '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      MsgBox('Failed to execute WSL2 check script.', mbError, MB_OK);
+      Exit;
+    end;
+
+    if ResultCode = 3010 then
+    begin
+      MsgBox('Windows features were enabled for WSL2. Please restart your computer and run the installer again to complete setup.',
+             mbInformation, MB_OK);
+      Exit;
+    end;
+
+    if ResultCode <> 0 then
+    begin
+      MsgBox('WSL2 check failed (error ' + IntToStr(ResultCode) + ').' + #13#10 +
+             'Please ensure WSL2 and VirtualMachinePlatform are enabled, then run the installer again.',
+             mbError, MB_OK);
+      Exit;
+    end;
+
+    // Step 2: Import HermesLinux distro (only if WSL2 check passed)
+    WizardForm.StatusLabel.Caption := 'Setting up HermesLinux environment (may take a few minutes)...';
+    if not Exec('powershell.exe',
+                '-ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\scripts\import-distro.ps1" -InstallDir "' + ExpandConstant('{app}') + '"',
+                '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      MsgBox('Failed to execute distro import script.', mbError, MB_OK);
+      Exit;
+    end;
+
+    if ResultCode <> 0 then
+    begin
+      MsgBox('HermesLinux setup failed (error ' + IntToStr(ResultCode) + ').' + #13#10 +
+             'The application files have been installed. You can try running the import manually or re-install.',
+             mbError, MB_OK);
     end;
   end;
 end;

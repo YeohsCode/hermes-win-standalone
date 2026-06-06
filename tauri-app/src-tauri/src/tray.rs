@@ -25,7 +25,7 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let _ = crate::stop_hermes().await;
-                    let _ = crate::start_hermes().await;
+                    let _ = crate::start_hermes(app_handle.clone()).await;
                     if let Some(window) = app_handle.get_webview_window("main") {
                         window.show().unwrap_or_default();
                     }

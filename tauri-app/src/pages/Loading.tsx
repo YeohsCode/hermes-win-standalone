@@ -1,19 +1,16 @@
 interface LoadingProps {
-  state: "checking" | "starting";
+  message: string;
+  detail?: string;
 }
 
-function Loading({ state }: LoadingProps) {
-  const message =
-    state === "checking"
-      ? "正在检测系统环境..."
-      : "正在启动 Hermes 服务...";
-
+function Loading({ message, detail }: LoadingProps) {
   return (
     <div style={styles.container}>
       <div style={styles.content}>
         <div style={styles.spinner} />
         <h1 style={styles.title}>Hermes</h1>
         <p style={styles.message}>{message}</p>
+        {detail && <p style={styles.detail}>{detail}</p>}
       </div>
     </div>
   );
@@ -53,6 +50,12 @@ const styles: Record<string, React.CSSProperties> = {
   message: {
     fontSize: "0.95rem",
     color: "#888",
+  },
+  detail: {
+    fontSize: "0.8rem",
+    color: "#666",
+    marginTop: "0.5rem",
+    fontStyle: "italic",
   },
 };
 

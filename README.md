@@ -1,117 +1,76 @@
-# Hermes Windows Standalone
+# Hermes Windows Offline Installer
 
-一键安装的 Windows 版 Hermes AI Agent 桌面应用。
+面向离线/企业环境的 Hermes AI Agent Windows 一键安装包。
 
 ## 特性
 
-- **Standalone 安装** — 安装包包含所有依赖，无需联网下载
-- **Tauri 桌面应用** — 原生 Windows 窗口 + 系统托盘常驻
-- **隔离 WSL2 环境** — 自定义 HermesLinux distro，不污染用户现有环境
-- **分层组件** — 核心聊天 / 浏览器自动化 / 语音 / 消息网关，按需安装
-- **动态端口** — 自动选择可用端口，避免冲突
-- **干净卸载** — `wsl --unregister` 一键彻底删除
+- **完全离线安装** — 安装包内含所有依赖，目标机器无需联网
+- **官方 Desktop App** — 打包上游 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 Electron 桌面应用
+- **完整功能** — 聊天、文件浏览、语音、设置管理、Skills、定时任务
+- **分层组件** — 核心 / 浏览器自动化 / 语音，按需选择
+- **企业分发** — 单个 .exe，支持静默安装，可通过 SCCM/GPO 部署
+- **中文界面** — 安装程序支持简体中文
 
 ## 系统要求
 
-- Windows 11 (或 Windows 10 2004+)
-- WSL2 已启用（安装程序可引导启用）
+- Windows 10 (1809+) 或 Windows 11
 - 4GB+ 可用磁盘空间（核心），8GB+（全功能）
+- 不需要 WSL、不需要联网
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────┐
-│  Tauri Desktop App (Windows 原生)       │
-│  ┌───────────────────────────────────┐  │
-│  │  WebView2 → localhost:{port}      │  │
-│  └───────────────────────────────────┘  │
-│  系统托盘 | 端口管理 | WSL 生命周期     │
-└──────────────────┬──────────────────────┘
-                   │ wsl -d HermesLinux
-┌──────────────────▼──────────────────────┐
-│  WSL2: HermesLinux (自定义 distro)      │
-│  ┌─────────────┐  ┌─────────────────┐  │
-│  │ hermes-agent│←─│ hermes-webui    │  │
-│  │ (AI Agent)  │  │ (Web UI :port)  │  │
-│  └─────────────┘  └─────────────────┘  │
-│  Python 3.12 | Node.js 22 | 系统工具   │
-└─────────────────────────────────────────┘
+HermesSetup.exe (Inno Setup 离线安装包)
+├─ Hermes Desktop App (Electron)  → {Program Files}\Hermes\
+├─ hermes-agent (Python venv)     → %LOCALAPPDATA%\hermes\hermes-agent\
+├─ PortableGit                    → %LOCALAPPDATA%\hermes\git\
+└─ setup-hermes.ps1               → PATH, HERMES_HOME, bootstrap marker
 ```
+
+安装完成后，Hermes Desktop App 直接启动，跳过首次联网下载步骤。
 
 ## 安装组件
 
 | 组件 | 内容 | 大小 |
 |------|------|------|
-| **Core** (必选) | hermes-agent + hermes-webui + Python + git + ripgrep | ~300MB |
-| **Browser** | Node.js 22 + Playwright + Chromium | ~300MB |
-| **Voice** | faster-whisper + ffmpeg + TTS 引擎 | ~500MB |
-| **Messaging** | Telegram/Discord/Slack/钉钉/飞书 + 云 SDK | ~50MB |
+| **Core** (必选) | Hermes Desktop + Agent Runtime + PortableGit | ~500MB |
+| **Browser** | Playwright + Chromium 浏览器自动化 | ~300MB |
+| **Voice** | faster-whisper + ffmpeg + TTS 语音引擎 | ~500MB |
 
 ## 项目结构
 
 ```
-code/
-├── tauri-app/          # Tauri 桌面应用 (Rust + React/TypeScript)
-│   ├── src-tauri/      #   Rust 后端: WSL 管理、端口、托盘
-│   └── src/            #   React 前端: Loading、Setup 引导
-├── wsl-distro/         # WSL2 rootfs 构建
-│   ├── Dockerfile.*    #   分层 Dockerfile (core/browser/voice/messaging)
-│   ├── scripts/        #   WSL 内服务管理脚本
-│   └── build-rootfs.sh #   构建入口
-├── installer/          # Inno Setup 安装程序
-│   ├── hermes-win.iss  #   安装脚本定义
-│   └── scripts/        #   PowerShell 辅助脚本
-├── scripts/            # 开发工具脚本
-├── tests/              # 测试脚本
-├── docs/               # 文档和工作日志
-└── .github/workflows/  # CI/CD
+hermes-win-standalone/
+├── installer/               # Inno Setup 安装程序
+│   ├── hermes-win.iss       #   安装脚本定义
+│   └── scripts/             #   PowerShell 安装/卸载脚本
+├── .github/workflows/       # CI/CD 流水线
+│   ├── build-release.yml    #   构建 + 打包 + 发布
+│   └── ci.yml               #   PR 验证
+├── tests/                   # 测试脚本
+└── docs/                    # 历史工作日志
 ```
 
-## 开发
-
-### 前置条件
-
-- Node.js 22+
-- Rust (stable)
-- Docker (用于构建 rootfs)
-
-### 本地开发
-
-```bash
-# 前端类型检查
-cd tauri-app && npm install && npx tsc --noEmit
-
-# Rust 编译检查
-cd tauri-app/src-tauri && cargo check
-
-# 构建 WSL rootfs (需要 Docker)
-cd wsl-distro
-export AGENT_SRC=../../ref/hermes-agent
-export WEBUI_SRC=../../ref/hermes-webui
-./build-rootfs.sh core
-```
-
-### Tauri 开发模式 (Windows)
-
-```bash
-cd tauri-app
-npm install
-npm run tauri dev
-```
+本项目不包含自有的桌面应用代码。所有构建在 CI (GitHub Actions) 中完成。
 
 ## 发布
 
-推送 `v*` 标签到 GitHub 即自动触发 CI 构建并发布 Release：
+推送 `v*` 标签即自动触发 CI 构建并发布 Release：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v3.0.0
+git push origin v3.0.0
 ```
 
 CI 流水线：
-1. **Linux Job**: 并行构建 4 个 rootfs 层 (core/browser/voice/messaging)
-2. **Windows Job**: 构建 Tauri .exe + Inno Setup 打包
-3. **Release Job**: 上传安装包到 GitHub Release
+1. **build-runtime-bundle** — 下载 hermes-agent，构建 Python venv，打包 PortableGit
+2. **build-electron-app** — 克隆上游仓库，构建 Electron Desktop App
+3. **package-installer** — Inno Setup 打包为单个 .exe
+4. **release** — 上传到 GitHub Releases
+
+## 版本对应
+
+`AGENT_VERSION` 在 `.github/workflows/build-release.yml` 中定义，指向上游 hermes-agent 的 git tag。
 
 ## License
 

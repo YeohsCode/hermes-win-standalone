@@ -1,0 +1,149 @@
+# setup-hermes.ps1 - Configure Hermes Agent after offline installation
+# Called by Inno Setup post-install. Sets up PATH, HERMES_HOME, and writes
+# the bootstrap-complete marker so the Electron Desktop App skips first-launch
+# bootstrap (which would need internet).
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$InstallDir
+)
+
+$ErrorActionPreference = "Stop"
+
+$HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
+$AgentRoot = Join-Path $HermesHome "hermes-agent"
+$VenvScripts = Join-Path $AgentRoot "venv\Scripts"
+$GitDir = Join-Path $HermesHome "git"
+$GitBinDir = Join-Path $GitDir "bin"
+$GitCmdDir = Join-Path $GitDir "cmd"
+
+Write-Host "Configuring Hermes Agent..." -ForegroundColor Yellow
+
+# --- Step 1: Set HERMES_HOME ---
+Write-Host "  Setting HERMES_HOME..."
+[Environment]::SetEnvironmentVariable("HERMES_HOME", $HermesHome, "User")
+$env:HERMES_HOME = $HermesHome
+
+# --- Step 2: Add venv Scripts and Git to PATH ---
+Write-Host "  Updating PATH..."
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$pathsToAdd = @($VenvScripts)
+
+if (Test-Path $GitBinDir) {
+    $pathsToAdd += $GitBinDir
+    $bashExe = Join-Path $GitBinDir "bash.exe"
+    if (Test-Path $bashExe) {
+        [Environment]::SetEnvironmentVariable("HERMES_GIT_BASH_PATH", $bashExe, "User")
+    }
+}
+
+foreach ($p in $pathsToAdd) {
+    if ($userPath -notlike "*$p*") {
+        $userPath = "$p;$userPath"
+    }
+}
+[Environment]::SetEnvironmentVariable("Path", $userPath, "User")
+
+# --- Step 3: Create HERMES_HOME directories ---
+Write-Host "  Creating data directories..."
+$dirs = @("logs", "sessions", "skills")
+foreach ($d in $dirs) {
+    $dirPath = Join-Path $HermesHome $d
+    if (-not (Test-Path $dirPath)) {
+        New-Item -ItemType Directory -Path $dirPath -Force | Out-Null
+    }
+}
+
+# --- Step 4: Create default config if missing ---
+$configFile = Join-Path $HermesHome "config.yaml"
+if (-not (Test-Path $configFile)) {
+    Write-Host "  Creating default config.yaml..."
+    @"
+# Hermes Agent Configuration
+# See https://github.com/NousResearch/hermes-agent for documentation
+"@ | Set-Content -Path $configFile -Encoding UTF8
+}
+
+$envFile = Join-Path $HermesHome ".env"
+if (-not (Test-Path $envFile)) {
+    Write-Host "  Creating default .env..."
+    @"
+# Hermes Agent Environment Variables
+# Add your API keys and tokens here
+# Example:
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+"@ | Set-Content -Path $envFile -Encoding UTF8
+}
+
+# --- Step 5: Write bootstrap-complete marker ---
+# The Electron Desktop App checks this marker to skip first-launch bootstrap.
+# Format must match upstream's writeBootstrapMarker() in electron/main.cjs.
+Write-Host "  Writing bootstrap-complete marker..."
+$markerPath = Join-Path $AgentRoot ".hermes-bootstrap-complete"
+
+$commitHash = "offline-install"
+$gitExe = Join-Path $GitCmdDir "git.exe"
+if (Test-Path $gitExe) {
+    try {
+        $result = & $gitExe -C $AgentRoot rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $result) {
+            $commitHash = $result.Trim()
+        }
+    } catch { }
+}
+
+$marker = @{
+    schemaVersion = 1
+    pinnedCommit = $commitHash
+    pinnedBranch = "main"
+    completedAt = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ")
+    desktopVersion = "offline-installer"
+    offlineInstall = $true
+} | ConvertTo-Json -Depth 2
+
+Set-Content -Path $markerPath -Value $marker -Encoding UTF8
+
+# --- Step 6: Verify installation ---
+Write-Host "  Verifying installation..."
+$hermesExe = Join-Path $VenvScripts "hermes.exe"
+$mainPy = Join-Path $AgentRoot "hermes_cli\main.py"
+$venvPython = Join-Path $VenvScripts "python.exe"
+
+$ok = $true
+if (Test-Path $hermesExe) {
+    Write-Host "    hermes.exe: OK" -ForegroundColor Green
+} else {
+    Write-Host "    hermes.exe: MISSING at $hermesExe" -ForegroundColor Yellow
+    $ok = $false
+}
+
+if (Test-Path $mainPy) {
+    Write-Host "    hermes_cli/main.py: OK" -ForegroundColor Green
+} else {
+    Write-Host "    hermes_cli/main.py: MISSING" -ForegroundColor Yellow
+    $ok = $false
+}
+
+if (Test-Path $venvPython) {
+    Write-Host "    venv python.exe: OK" -ForegroundColor Green
+} else {
+    Write-Host "    venv python.exe: MISSING" -ForegroundColor Yellow
+    $ok = $false
+}
+
+if (Test-Path $markerPath) {
+    Write-Host "    bootstrap marker: OK" -ForegroundColor Green
+} else {
+    Write-Host "    bootstrap marker: MISSING" -ForegroundColor Yellow
+    $ok = $false
+}
+
+Write-Host ""
+if ($ok) {
+    Write-Host "Hermes Agent setup complete!" -ForegroundColor Green
+} else {
+    Write-Host "Hermes Agent setup completed with warnings." -ForegroundColor Yellow
+    Write-Host "Some components may not have installed correctly." -ForegroundColor Yellow
+}
+exit 0

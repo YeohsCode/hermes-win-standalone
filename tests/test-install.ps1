@@ -1,6 +1,6 @@
-# test-install.ps1 - End-to-end installation test
-# Run on a clean Windows 11 machine with WSL2 enabled
-# Usage: powershell -ExecutionPolicy Bypass -File test-install.ps1
+# test-install.ps1 - End-to-end installation test for Hermes Windows Offline Installer
+# Run on a clean Windows 10/11 machine.
+# Usage: powershell -ExecutionPolicy Bypass -File test-install.ps1 -InstallerPath .\HermesSetup.exe
 
 param(
     [string]$InstallerPath = "",
@@ -27,65 +27,99 @@ function Test-Step {
     }
 }
 
-Write-Host "=== Hermes Windows Standalone - E2E Test ===" -ForegroundColor Yellow
+Write-Host "=== Hermes Windows Offline Installer - E2E Test ===" -ForegroundColor Yellow
 Write-Host ""
 
-# Test 1: WSL2 prerequisite
-Test-Step "WSL2 Available" {
-    $result = wsl --version 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "WSL2 not available" }
-}
-
-# Test 2: Run installer (silent mode)
+# Test 1: Run installer (silent mode)
 if ($InstallerPath) {
     Test-Step "Run Installer" {
+        if (-not (Test-Path $InstallerPath)) { throw "Installer not found: $InstallerPath" }
         $proc = Start-Process -FilePath $InstallerPath -ArgumentList "/SILENT /SUPPRESSMSGBOXES" -Wait -PassThru
         if ($proc.ExitCode -ne 0) { throw "Installer exited with code $($proc.ExitCode)" }
     }
 }
 
-# Test 3: Verify HermesLinux distro registered
-Test-Step "HermesLinux Distro Registered" {
-    $distros = wsl --list --quiet 2>&1
-    if ($distros -notmatch "HermesLinux") { throw "HermesLinux not found in WSL distros" }
+# Test 2: Verify Electron Desktop App installed
+Test-Step "Hermes Desktop App Installed" {
+    $exePath = Join-Path $env:ProgramFiles "Hermes\Hermes.exe"
+    if (-not (Test-Path $exePath)) {
+        $exePath = Join-Path ${env:ProgramFiles(x86)} "Hermes\Hermes.exe"
+    }
+    if (-not (Test-Path $exePath)) { throw "Hermes.exe not found in Program Files" }
+    Write-Host "  Found at: $exePath"
 }
 
-# Test 4: Verify core files in distro
-Test-Step "Core Files Present" {
-    $result = wsl -d HermesLinux -- ls /opt/hermes/hermes-agent/pyproject.toml 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "hermes-agent not found in distro" }
+# Test 3: Verify HERMES_HOME set
+Test-Step "HERMES_HOME Set" {
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    if (-not $hermesHome) { throw "HERMES_HOME not set" }
+    Write-Host "  HERMES_HOME = $hermesHome"
+}
 
-    $result = wsl -d HermesLinux -- ls /opt/hermes/hermes-webui/server.py 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "hermes-webui not found in distro" }
+# Test 4: Verify hermes-agent source root
+Test-Step "Agent Source Root Present" {
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $mainPy = Join-Path $hermesHome "hermes-agent\hermes_cli\main.py"
+    if (-not (Test-Path $mainPy)) { throw "hermes_cli/main.py not found" }
 }
 
 # Test 5: Verify Python venv
 Test-Step "Python Venv Working" {
-    $result = wsl -d HermesLinux -- /opt/hermes/venv/bin/python --version 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "Python venv not working" }
-    Write-Host "  Python version: $result"
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $python = Join-Path $hermesHome "hermes-agent\venv\Scripts\python.exe"
+    if (-not (Test-Path $python)) { throw "venv python.exe not found" }
+    $version = & $python --version 2>&1
+    Write-Host "  Python version: $version"
 }
 
-# Test 6: Verify hermes-agent importable
-Test-Step "Hermes Agent Importable" {
-    $result = wsl -d HermesLinux -- /opt/hermes/venv/bin/python -c "from run_agent import AIAgent; print('OK')" 2>&1
-    if ($result -notmatch "OK") { throw "Cannot import AIAgent: $result" }
+# Test 6: Verify hermes CLI
+Test-Step "Hermes CLI Available" {
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $hermes = Join-Path $hermesHome "hermes-agent\venv\Scripts\hermes.exe"
+    if (-not (Test-Path $hermes)) { throw "hermes.exe not found in venv" }
+    $version = & $hermes --version 2>&1
+    Write-Host "  Hermes version: $version"
 }
 
-# Test 7: Start services
-Test-Step "Start Services" {
-    wsl -d HermesLinux -- bash /opt/hermes/scripts/start-services.sh 8787
-    if ($LASTEXITCODE -ne 0) { throw "Failed to start services" }
-    Start-Sleep -Seconds 5
+# Test 7: Verify bootstrap-complete marker
+Test-Step "Bootstrap Marker Present" {
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $marker = Join-Path $hermesHome "hermes-agent\.hermes-bootstrap-complete"
+    if (-not (Test-Path $marker)) { throw "Bootstrap marker not found" }
+    $content = Get-Content $marker -Raw | ConvertFrom-Json
+    if ($content.schemaVersion -ne 1) { throw "Invalid marker schema version" }
+    Write-Host "  Marker OK (commit: $($content.pinnedCommit))"
 }
 
-# Test 8: WebUI responds
-Test-Step "WebUI Health Check" {
-    $maxRetries = 10
+# Test 8: Verify PortableGit
+Test-Step "PortableGit Available" {
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $git = Join-Path $hermesHome "git\cmd\git.exe"
+    if (-not (Test-Path $git)) { throw "git.exe not found" }
+    $version = & $git --version 2>&1
+    Write-Host "  Git version: $version"
+}
+
+# Test 9: Verify PATH entries
+Test-Step "PATH Entries Set" {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $venvScripts = Join-Path $hermesHome "hermes-agent\venv\Scripts"
+    if ($userPath -notlike "*$venvScripts*") { throw "Venv Scripts not in PATH" }
+    Write-Host "  PATH includes venv Scripts"
+}
+
+# Test 10: Start hermes dashboard (quick smoke test)
+Test-Step "Dashboard Starts" {
+    $hermesHome = [Environment]::GetEnvironmentVariable("HERMES_HOME", "User")
+    $hermes = Join-Path $hermesHome "hermes-agent\venv\Scripts\hermes.exe"
+    $proc = Start-Process -FilePath $hermes -ArgumentList "dashboard", "--no-open", "--port", "9199" -PassThru -WindowStyle Hidden
+    Start-Sleep -Seconds 10
+
     $success = $false
-    for ($i = 0; $i -lt $maxRetries; $i++) {
+    for ($i = 0; $i -lt 5; $i++) {
         try {
-            $response = Invoke-WebRequest -Uri "http://localhost:8787/health" -TimeoutSec 5 -UseBasicParsing
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:9199/api/status" -TimeoutSec 3 -UseBasicParsing
             if ($response.StatusCode -eq 200) {
                 $success = $true
                 break
@@ -93,22 +127,10 @@ Test-Step "WebUI Health Check" {
         } catch {}
         Start-Sleep -Seconds 2
     }
-    if (-not $success) { throw "WebUI did not respond after $maxRetries retries" }
-}
 
-# Test 9: Stop services
-Test-Step "Stop Services" {
-    wsl -d HermesLinux -- bash /opt/hermes/scripts/stop-services.sh
-    if ($LASTEXITCODE -ne 0) { throw "Failed to stop services" }
-}
-
-# Test 10: Uninstall
-if (-not $SkipUninstall) {
-    Test-Step "Uninstall Clean" {
-        wsl --unregister HermesLinux 2>&1 | Out-Null
-        $distros = wsl --list --quiet 2>&1
-        if ($distros -match "HermesLinux") { throw "HermesLinux still registered after uninstall" }
-    }
+    $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+    if (-not $success) { throw "Dashboard did not respond on port 9199" }
+    Write-Host "  Dashboard responded OK"
 }
 
 # Summary

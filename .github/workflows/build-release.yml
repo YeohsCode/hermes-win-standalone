@@ -8,165 +8,173 @@ on:
     branches: [main]
 
 env:
-  AGENT_VERSION: "v2026.5.29.2"
-  WEBUI_VERSION: "v0.50.76"
+  AGENT_VERSION: "v2026.6.5"
 
 jobs:
-  build-rootfs:
-    name: Build WSL2 Rootfs Layers
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        layer: [core, browser, voice, messaging]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Download hermes-agent source
-        run: |
-          wget -q "https://github.com/NousResearch/hermes-agent/archive/refs/tags/${{ env.AGENT_VERSION }}.tar.gz" -O agent.tar.gz
-          mkdir -p wsl-distro/.build-context
-          tar xzf agent.tar.gz -C wsl-distro/.build-context
-          mv wsl-distro/.build-context/hermes-agent-* wsl-distro/.build-context/hermes-agent
-
-      - name: Download hermes-webui source
-        run: |
-          wget -q "https://github.com/nesquena/hermes-webui/archive/refs/tags/${{ env.WEBUI_VERSION }}.tar.gz" -O webui.tar.gz
-          mkdir -p wsl-distro/.build-context
-          tar xzf webui.tar.gz -C wsl-distro/.build-context
-          mv wsl-distro/.build-context/hermes-webui-* wsl-distro/.build-context/hermes-webui
-
-      - name: Copy scripts to build context
-        run: cp -r wsl-distro/scripts wsl-distro/.build-context/scripts
-
-      - name: Build core image
-        if: matrix.layer == 'core'
-        run: |
-          docker build \
-            -f wsl-distro/Dockerfile.core \
-            -t hermes-core:latest \
-            wsl-distro/.build-context
-
-      - name: Build core image (dependency for other layers)
-        if: matrix.layer != 'core'
-        run: |
-          docker build \
-            -f wsl-distro/Dockerfile.core \
-            -t hermes-core:latest \
-            wsl-distro/.build-context
-
-      - name: Build layer image
-        if: matrix.layer != 'core'
-        run: |
-          docker build \
-            -f wsl-distro/Dockerfile.${{ matrix.layer }} \
-            -t hermes-${{ matrix.layer }}:latest \
-            wsl-distro/.build-context
-
-      - name: Export core rootfs
-        if: matrix.layer == 'core'
-        run: |
-          mkdir -p output
-          CONTAINER_ID=$(docker create hermes-core:latest)
-          docker export $CONTAINER_ID | gzip > output/rootfs-core.tar.gz
-          docker rm $CONTAINER_ID
-          ls -lh output/rootfs-core.tar.gz
-
-      - name: Export layer (differential against core)
-        if: matrix.layer != 'core'
-        run: |
-          mkdir -p output
-          bash wsl-distro/export-differential-layer.sh \
-            "hermes-${{ matrix.layer }}:latest" \
-            "hermes-core:latest" \
-            "output/layer-${{ matrix.layer }}.tar.gz"
-
-      - name: Upload rootfs artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootfs-${{ matrix.layer }}
-          path: output/*.tar.gz
-          retention-days: 1
-          compression-level: 0
-          if-no-files-found: error
-
-  build-tauri:
-    name: Build Tauri App
+  build-runtime-bundle:
+    name: Build Runtime Bundle
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        shell: pwsh
+        run: |
+          irm https://astral.sh/uv/install.ps1 | iex
+          echo "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Download hermes-agent source
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/NousResearch/hermes-agent/archive/refs/tags/${{ env.AGENT_VERSION }}.tar.gz" -OutFile agent.tar.gz
+          New-Item -ItemType Directory -Force -Path build\hermes-src | Out-Null
+          tar xzf agent.tar.gz -C build\hermes-src
+          Move-Item build\hermes-src\hermes-agent-* build\hermes-src\hermes-agent
+
+      - name: Create venv and install hermes-agent
+        shell: pwsh
+        run: |
+          $targetRoot = "build\runtime-bundle\hermes-agent"
+          New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+
+          # Copy source tree (needed for isHermesSourceRoot detection)
+          Copy-Item -Recurse "build\hermes-src\hermes-agent\*" $targetRoot
+
+          # Create venv inside the source tree (matches upstream layout)
+          uv venv "$targetRoot\venv" --python 3.11
+
+          # Non-editable install so venv is relocatable
+          # Use string concat to avoid PowerShell interpreting [all,web] as indexer
+          $installSpec = "${targetRoot}[all,web]"
+          uv pip install --python "$targetRoot\venv\Scripts\python.exe" `
+            "$installSpec" `
+            --no-cache-dir
+
+      - name: Install PortableGit
+        shell: pwsh
+        run: |
+          $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe"
+          Invoke-WebRequest -Uri $gitUrl -OutFile PortableGit.exe
+          New-Item -ItemType Directory -Force -Path build\runtime-bundle\git | Out-Null
+          Start-Process -FilePath .\PortableGit.exe -ArgumentList "-o", "build\runtime-bundle\git", "-y" -Wait
+
+      - name: Verify bundle
+        shell: pwsh
+        run: |
+          $hermesExe = "build\runtime-bundle\hermes-agent\venv\Scripts\hermes.exe"
+          if (Test-Path $hermesExe) {
+            Write-Host "hermes.exe found" -ForegroundColor Green
+            & $hermesExe --version
+          } else {
+            Write-Host "ERROR: hermes.exe not found" -ForegroundColor Red
+            exit 1
+          }
+
+          $mainPy = "build\runtime-bundle\hermes-agent\hermes_cli\main.py"
+          if (Test-Path $mainPy) {
+            Write-Host "hermes_cli/main.py found (source root marker)" -ForegroundColor Green
+          } else {
+            Write-Host "ERROR: hermes_cli/main.py not found" -ForegroundColor Red
+            exit 1
+          }
+
+      - name: Upload runtime bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-bundle
+          path: build/runtime-bundle
+          retention-days: 1
+          if-no-files-found: error
+
+  build-electron-app:
+    name: Build Electron Desktop App
+    runs-on: windows-latest
+    steps:
+      - name: Checkout hermes-agent
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.AGENT_VERSION }}
+          path: hermes-agent
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
+      - name: Setup Python (needed for node-pty native build)
+        uses: actions/setup-python@v5
         with:
-          workspaces: 'tauri-app/src-tauri -> target'
+          python-version: '3.11'
 
-      - name: Generate icons
-        shell: bash
-        run: bash scripts/generate-icons.sh
-
-      - name: Install frontend dependencies
-        working-directory: tauri-app
+      - name: Install workspace dependencies
+        shell: pwsh
+        working-directory: hermes-agent
         run: npm ci
 
-      - name: Build Tauri app
-        working-directory: tauri-app
-        run: npm run tauri build
+      - name: Build unpacked Electron app
+        shell: pwsh
+        working-directory: hermes-agent/apps/desktop
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ""
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ env.AGENT_VERSION }}
+        run: npm run pack
 
-      - name: Upload Tauri artifact
+      - name: Verify Electron app output
+        shell: pwsh
+        run: |
+          $exePath = "hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe"
+          if (Test-Path $exePath) {
+            Write-Host "Hermes.exe found" -ForegroundColor Green
+          } else {
+            Write-Host "ERROR: Hermes.exe not found at $exePath" -ForegroundColor Red
+            Get-ChildItem -Recurse "hermes-agent\apps\desktop\release" -ErrorAction SilentlyContinue | Select-Object -First 20
+            exit 1
+          }
+
+      - name: Upload Electron app
         uses: actions/upload-artifact@v4
         with:
-          name: tauri-app
-          path: tauri-app/src-tauri/target/release/hermes-desktop.exe
+          name: electron-app
+          path: hermes-agent/apps/desktop/release/win-unpacked
           retention-days: 1
           if-no-files-found: error
 
   package-installer:
     name: Package Installer
     runs-on: windows-latest
-    needs: [build-rootfs, build-tauri]
+    needs: [build-runtime-bundle, build-electron-app]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download all rootfs artifacts
+      - name: Download runtime bundle
         uses: actions/download-artifact@v4
         with:
-          pattern: rootfs-*
-          path: wsl-distro/output
-          merge-multiple: true
+          name: runtime-bundle
+          path: build/runtime-bundle
 
-      - name: Download Tauri app artifact
+      - name: Download Electron app
         uses: actions/download-artifact@v4
         with:
-          name: tauri-app
-          path: tauri-app/src-tauri/target/release
+          name: electron-app
+          path: build/electron-app
 
       - name: List artifacts
+        shell: pwsh
         run: |
-          echo "=== Rootfs artifacts ==="
-          dir wsl-distro\output
-          echo "=== Tauri artifact ==="
-          dir tauri-app\src-tauri\target\release\hermes-desktop.exe
+          echo "=== Runtime bundle ==="
+          Get-ChildItem -Recurse build\runtime-bundle -Depth 1 | Select-Object FullName
+          echo "=== Electron app ==="
+          Get-ChildItem build\electron-app | Select-Object Name
 
-      # ChineseSimplified.isl is an "unofficial" translation not bundled with Inno Setup.
-      # The runner image only ships official languages, so download it from jrsoftware.org
-      # into the compiler's Languages directory before compiling.
       - name: Install ChineseSimplified language file
         shell: pwsh
         run: |
@@ -202,35 +210,31 @@ jobs:
           name: hermes-installer
           path: release
 
-      - name: Download individual rootfs layers
-        uses: actions/download-artifact@v4
-        with:
-          pattern: rootfs-*
-          path: release/layers
-          merge-multiple: true
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: "Hermes ${{ github.ref_name }}"
           body: |
-            ## Hermes Windows Standalone ${{ github.ref_name }}
+            ## Hermes Windows Offline Installer ${{ github.ref_name }}
 
             ### Downloads
 
-            - **HermesSetup-*.exe** — Full installer (includes all components, select during install)
-            - **rootfs-core.tar.gz** — Core layer only (for manual WSL import)
-            - **layer-browser.tar.gz** — Browser automation add-on
-            - **layer-voice.tar.gz** — Voice/speech add-on
-            - **layer-messaging.tar.gz** — Messaging platforms add-on
+            - **HermesSetup-*.exe** — Full offline installer (no internet required)
+
+            ### What's Included
+
+            - Hermes Desktop App (Electron) — full-featured GUI with chat, file browser, voice, settings
+            - Hermes Agent runtime (pre-built Python venv, offline)
+            - PortableGit for shell tools
+            - Optional: Browser automation (Playwright + Chromium)
+            - Optional: Voice / speech (STT + TTS)
 
             ### System Requirements
 
-            - Windows 11 (or Windows 10 2004+)
-            - WSL2 enabled (installer will guide you)
+            - Windows 10 (1809+) or Windows 11
             - 4GB+ disk space (core), 8GB+ (full)
+            - No internet required for installation
           files: |
             release/HermesSetup-*.exe
-            release/layers/*.tar.gz
           draft: false
           prerelease: false

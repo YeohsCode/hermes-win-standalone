@@ -1,11 +1,12 @@
-; Hermes Windows Standalone - Inno Setup Script
-; Builds a standalone installer for Hermes AI Agent on Windows
+; Hermes Windows Offline Installer - Inno Setup Script
+; Packages the upstream Hermes Desktop App (Electron) + pre-built runtime
+; for fully offline installation on Windows.
 
 #define MyAppName "Hermes"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "3.0.0"
 #define MyAppPublisher "Hermes"
-#define MyAppURL "https://github.com/YeohsCode/hermes-win-standalone"
-#define MyAppExeName "hermes-desktop.exe"
+#define MyAppURL "https://github.com/NousResearch/hermes-agent"
+#define MyAppExeName "Hermes.exe"
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -32,26 +33,27 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 
 [Types]
 Name: "full"; Description: "Full installation (all features)"
-Name: "core"; Description: "Core only (chat + web UI)"
+Name: "core"; Description: "Core only (Desktop App + Agent)"
 Name: "custom"; Description: "Custom installation"; Flags: iscustom
 
 [Components]
-Name: "core"; Description: "Hermes Core (Agent + Web UI)"; Types: full core custom; Flags: fixed
+Name: "core"; Description: "Hermes Core (Desktop App + Agent Runtime)"; Types: full core custom; Flags: fixed
 Name: "browser"; Description: "Browser Automation (Playwright + Chromium, ~300MB)"; Types: full
 Name: "voice"; Description: "Voice / Speech (STT + TTS, ~500MB)"; Types: full
-Name: "messaging"; Description: "Messaging Platforms (Telegram, Discord, Slack, etc., ~50MB)"; Types: full
 
 [Files]
-; Tauri application
-Source: "..\tauri-app\src-tauri\target\release\hermes-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Core WSL rootfs
-Source: "..\wsl-distro\output\rootfs-core.tar.gz"; DestDir: "{app}\wsl"; Components: core; Flags: ignoreversion
-; Optional layers
-Source: "..\wsl-distro\output\layer-browser.tar.gz"; DestDir: "{app}\wsl"; Components: browser; Flags: ignoreversion
-Source: "..\wsl-distro\output\layer-voice.tar.gz"; DestDir: "{app}\wsl"; Components: voice; Flags: ignoreversion
-Source: "..\wsl-distro\output\layer-messaging.tar.gz"; DestDir: "{app}\wsl"; Components: messaging; Flags: ignoreversion
+; Electron Desktop App (unpacked)
+Source: "..\build\electron-app\*"; DestDir: "{app}"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; Pre-built runtime (hermes-agent source + venv + PortableGit)
+Source: "..\build\runtime-bundle\hermes-agent\*"; DestDir: "{localappdata}\hermes\hermes-agent"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\build\runtime-bundle\git\*"; DestDir: "{localappdata}\hermes\git"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; Optional browser automation deps
+Source: "..\build\browser-bundle\*"; DestDir: "{localappdata}\hermes\browser"; Components: browser; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; Optional voice deps
+Source: "..\build\voice-bundle\*"; DestDir: "{localappdata}\hermes\voice"; Components: voice; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 ; Helper scripts
-Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs
+Source: "scripts\setup-hermes.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\uninstall.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -68,99 +70,28 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Hermes"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\uninstall.ps1"""; Flags: runhidden
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\uninstall.ps1"" -InstallDir ""{app}"""; Flags: runhidden
 
 [Code]
-function InitializeSetup(): Boolean;
-var
-  ResultCode: Integer;
-  WslReady: Boolean;
-begin
-  Result := True;
-  WslReady := False;
-
-  // wsl --status works on both inbox WSL (Win10) and Store WSL (Win11).
-  if Exec('wsl', '--status', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-  begin
-    if ResultCode = 0 then
-      WslReady := True;
-  end;
-
-  // Fallback: wsl --list succeeds if WSL is functional at all
-  if not WslReady then
-  begin
-    if Exec('wsl', '--list --quiet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    begin
-      if ResultCode = 0 then
-        WslReady := True;
-    end;
-  end;
-
-  if not WslReady then
-  begin
-    if MsgBox('WSL2 is not enabled on this system.' + #13#10 + #13#10 +
-              'Hermes requires WSL2 to run. Would you like to enable it now?' + #13#10 +
-              '(This requires a system restart)', mbConfirmation, MB_YESNO) = IDYES then
-    begin
-      Exec('powershell.exe', '-ExecutionPolicy Bypass -Command "wsl --install --no-distribution"',
-           '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
-      MsgBox('WSL2 has been enabled. Please restart your computer and run this installer again.',
-             mbInformation, MB_OK);
-      Result := False;
-    end else
-    begin
-      Result := False;
-    end;
-  end;
-end;
-
-// Post-install: run WSL2 check and distro import with proper error handling.
-// Using CurStepChanged instead of [Run] so we can abort import if check fails.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
-    // Step 1: Ensure WSL2 features are enabled and configured
-    WizardForm.StatusLabel.Caption := 'Checking WSL2 status...';
+    WizardForm.StatusLabel.Caption := 'Configuring Hermes Agent...';
     if not Exec('powershell.exe',
-                '-ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\scripts\check-wsl2.ps1"',
+                '-ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\scripts\setup-hermes.ps1" -InstallDir "' + ExpandConstant('{app}') + '"',
                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     begin
-      MsgBox('Failed to execute WSL2 check script.', mbError, MB_OK);
-      Exit;
-    end;
-
-    if ResultCode = 3010 then
-    begin
-      MsgBox('Windows features were enabled for WSL2. Please restart your computer and run the installer again to complete setup.',
-             mbInformation, MB_OK);
+      MsgBox('Failed to execute setup script.', mbError, MB_OK);
       Exit;
     end;
 
     if ResultCode <> 0 then
     begin
-      MsgBox('WSL2 check failed (error ' + IntToStr(ResultCode) + ').' + #13#10 +
-             'Please ensure WSL2 and VirtualMachinePlatform are enabled, then run the installer again.',
-             mbError, MB_OK);
-      Exit;
-    end;
-
-    // Step 2: Import HermesLinux distro (only if WSL2 check passed)
-    WizardForm.StatusLabel.Caption := 'Setting up HermesLinux environment (may take a few minutes)...';
-    if not Exec('powershell.exe',
-                '-ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\scripts\import-distro.ps1" -InstallDir "' + ExpandConstant('{app}') + '"',
-                '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    begin
-      MsgBox('Failed to execute distro import script.', mbError, MB_OK);
-      Exit;
-    end;
-
-    if ResultCode <> 0 then
-    begin
-      MsgBox('HermesLinux setup failed (error ' + IntToStr(ResultCode) + ').' + #13#10 +
-             'The application files have been installed. You can try running the import manually or re-install.',
+      MsgBox('Hermes setup encountered an issue (error ' + IntToStr(ResultCode) + ').' + #13#10 +
+             'The application files have been installed. You may need to configure manually.',
              mbError, MB_OK);
     end;
   end;

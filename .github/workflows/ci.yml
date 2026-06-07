@@ -7,54 +7,45 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-check:
-    name: Lint & Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Check Dockerfile syntax
-        run: |
-          docker run --rm -i hadolint/hadolint < wsl-distro/Dockerfile.core || true
-
-      - name: Check shell scripts
-        run: |
-          sudo apt-get install -y shellcheck
-          shellcheck wsl-distro/scripts/*.sh || true
-
-  build-tauri-check:
-    name: Tauri Build Check
+  validate-scripts:
+    name: Validate Installer Scripts
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Check PowerShell script syntax
+        shell: pwsh
+        run: |
+          $errors = 0
+          Get-ChildItem -Path installer/scripts -Filter *.ps1 | ForEach-Object {
+            Write-Host "Checking $($_.Name)..."
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              Write-Host "  ERRORS in $($_.Name):" -ForegroundColor Red
+              $parseErrors | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+              $errors++
+            } else {
+              Write-Host "  OK" -ForegroundColor Green
+            }
+          }
+          if ($errors -gt 0) { exit 1 }
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Validate Inno Setup script references
+        shell: pwsh
+        run: |
+          $issContent = Get-Content installer/hermes-win.iss -Raw
+          Write-Host "Inno Setup script loaded ($($issContent.Length) chars)" -ForegroundColor Green
 
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: 'tauri-app/src-tauri -> target'
-
-      - name: Generate icons
-        shell: bash
-        run: bash scripts/generate-icons.sh
-
-      - name: Install frontend dependencies
-        working-directory: tauri-app
-        run: npm ci
-
-      - name: Type check frontend
-        working-directory: tauri-app
-        run: npx tsc --noEmit
-
-      - name: Check Rust compilation
-        working-directory: tauri-app/src-tauri
-        run: cargo check
+          # Check that required script files exist
+          $requiredScripts = @("installer/scripts/setup-hermes.ps1", "installer/scripts/uninstall.ps1")
+          foreach ($script in $requiredScripts) {
+            if (Test-Path $script) {
+              Write-Host "  $script exists" -ForegroundColor Green
+            } else {
+              Write-Host "  MISSING: $script" -ForegroundColor Red
+              exit 1
+            }
+          }

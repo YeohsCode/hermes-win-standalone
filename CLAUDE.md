@@ -4,79 +4,63 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Hermes Windows Standalone is a one-click Windows installer for the Hermes AI Agent. It bundles a Tauri desktop shell, an isolated WSL2 distribution (`HermesLinux`), and an Inno Setup installer into a single `.exe`. The installer ships all dependencies offline — no network downloads on the target machine.
+Hermes Windows Offline Installer — a single-exe Windows installer that bundles the official Hermes Desktop App (Electron) and a pre-built Python runtime with hermes-agent, enabling fully offline installation. No network downloads on the target machine.
 
-The repo itself contains **no Hermes application code**. It pulls `hermes-agent` and `hermes-webui` from upstream (pinned via `AGENT_VERSION` / `WEBUI_VERSION` in `.github/workflows/build-release.yml`) and packages them into WSL rootfs images.
+The project does NOT contain its own desktop shell or agent code. It packages the upstream [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) Electron Desktop App and Python runtime into an Inno Setup installer for offline/enterprise distribution.
+
+The upstream `AGENT_VERSION` is pinned in `.github/workflows/build-release.yml`.
 
 ## Architecture
 
-Three independent build targets that combine at install time:
-
 ```
-Tauri .exe (Windows)  ──spawns──▶  wsl -d HermesLinux  ──runs──▶  hermes-agent + hermes-webui
-     ▲                                    ▲
-     │                                    │
-   WebView2 iframe ──HTTP──▶  http://localhost:{dynamic-port}
+CI Pipeline
+├─ build-runtime-bundle    → Python venv + hermes-agent + PortableGit
+├─ build-electron-app      → Electron Desktop App (unpacked)
+└─ package-installer       → Inno Setup → HermesSetup-x.x.x.exe
+
+User Install (offline, single .exe)
+├─ Electron Desktop App    → {app}\
+├─ hermes-agent runtime    → %LOCALAPPDATA%\hermes\hermes-agent\
+├─ PortableGit             → %LOCALAPPDATA%\hermes\git\
+└─ setup-hermes.ps1        → PATH, HERMES_HOME, bootstrap marker
 ```
 
-**1. `tauri-app/` — Windows shell (Rust + React 19 + Vite)**
-- `src-tauri/src/main.rs` exposes 4 Tauri commands: `check_wsl_ready`, `start_hermes`, `stop_hermes`, `get_hermes_status`. The frontend (`src/App.tsx`) drives a state machine: `checking → setup_required | starting → ready | error`, then embeds the WebUI as an iframe.
-- `wsl.rs` shells out to `wsl.exe` — it does NOT use a WSL Rust crate. The distro name `HermesLinux` and script paths (`/opt/hermes/scripts/{start,stop,health}-services.sh`) are hardcoded constants and must stay in sync with `wsl-distro/scripts/`.
-- `port.rs` finds a free port starting from 8787 (avoids conflicts when multiple instances or other apps occupy the default).
-- `tray.rs` builds the system tray. Closing the window hides instead of exiting (`prevent_close` in `main.rs`); only the tray "退出" item actually quits and stops services.
+**Key insight:** The upstream Electron app (`apps/desktop/`) has a first-launch bootstrap that downloads the runtime from the internet. Our installer pre-populates the runtime so the app skips bootstrap entirely. This is detected via:
+- `%LOCALAPPDATA%\hermes\hermes-agent\.hermes-bootstrap-complete` marker file
+- `hermes_cli/main.py` must exist in the source root
+- `venv/Scripts/python.exe` must exist
 
-**2. `wsl-distro/` — Layered rootfs (Docker → tar.gz)**
-- Layers: `core` (required, ~300MB: Ubuntu 24.04 + Python 3.12 + uv + hermes-agent[all,web] + hermes-webui + git/ripgrep), `browser` (Playwright + Chromium), `voice` (faster-whisper + ffmpeg + TTS), `messaging` (Telegram/Discord/Slack/钉钉/飞书 + cloud SDKs).
-- `build-rootfs.sh` builds via Docker, then `docker export | gzip` produces a flat rootfs tarball suitable for `wsl --import`. Layer tarballs are produced by `export-differential-layer.sh`, which inventories the core image's file paths, walks the full layer image, and prunes any file that already exists in core (path-based diff — fast, and correct because layer Dockerfiles only ADD files). Layers are installed by tar-extracting at `/` (see `scripts/install-layer.sh`), which uses `/opt/hermes/.layers/<name>.installed` as an idempotency marker.
-- The build context is assembled in `.build-context/` by copying `${AGENT_SRC}` and `${WEBUI_SRC}` (defaults: `../../ref/hermes-agent` and `../../ref/hermes-webui`). CI bypasses this by downloading the pinned tags directly.
-- `scripts/start-services.sh` launches `hermes-agent gateway` and `hermes-webui server.py` via `nohup`, writing PIDs to `/run/hermes/` and logs to `/root/.hermes/logs/`. Both run as root inside WSL — `wsl.conf` sets `default=root`.
-
-**3. `installer/hermes-win.iss` — Inno Setup**
-- Component selection (`core` is `fixed`, others optional) maps directly to which `layer-*.tar.gz` files get copied to `{app}\wsl\` and then installed by `import-distro.ps1`.
-- `InitializeSetup()` (Pascal) checks `wsl --version` and, if missing, offers `wsl --install --no-distribution` and aborts for a reboot.
-- Uninstall calls `uninstall.ps1`, which is expected to `wsl --unregister HermesLinux` for a clean removal.
+**1. `installer/hermes-win.iss` — Inno Setup**
+- Core component (fixed): Electron Desktop App + pre-built hermes-agent Python venv + PortableGit
+- Optional: browser automation (Playwright + Chromium), voice (STT/TTS)
+- Post-install runs `setup-hermes.ps1` which configures `HERMES_HOME`, PATH, writes bootstrap marker
+- Uninstall runs `uninstall.ps1` which removes scheduled tasks, PATH entries, and env vars (preserves user data)
 
 ## Common Commands
 
 ```bash
-# Frontend type check (run from tauri-app/)
-cd tauri-app && npm install && npx tsc --noEmit
+# There is no local build/dev workflow — this is a packaging project.
+# All builds happen in CI (GitHub Actions on windows-latest).
 
-# Rust compile check (run from tauri-app/src-tauri/)
-cd tauri-app/src-tauri && cargo check
-
-# Tauri dev mode (Windows only — needs WSL2 + HermesLinux already imported)
-cd tauri-app && npm run tauri dev
-
-# Tauri production build (Windows only)
-cd tauri-app && npm run tauri build
-
-# Build a single rootfs layer (requires Docker + sources at AGENT_SRC/WEBUI_SRC)
-cd wsl-distro
-export AGENT_SRC=../../ref/hermes-agent
-export WEBUI_SRC=../../ref/hermes-webui
-./build-rootfs.sh core         # or: browser | voice | messaging | all
-
-# Generate Tauri icons (cross-platform Python; run before any Tauri build)
-bash scripts/generate-icons.sh
+# To test the Inno Setup script syntax locally (requires Inno Setup 6):
+iscc installer/hermes-win.iss
 ```
-
-There is no test runner in this repo. `tests/test-install.ps1` is a Windows E2E install smoke check, and `tests/test-rootfs-build.sh` is a Docker build sanity check — neither runs in CI.
 
 ## Release Flow
 
 Pushing a `v*` tag triggers `.github/workflows/build-release.yml`:
-1. **build-rootfs** (Linux, matrix over 4 layers) — downloads pinned `hermes-agent` and `hermes-webui` tarballs, builds Docker images, exports `.tar.gz` artifacts.
-2. **build-tauri** (Windows) — `npm ci` + `npm run tauri build` → `hermes-desktop.exe` (the Cargo binary; this is also what gets installed on the user's machine).
+1. **build-runtime-bundle** (Windows) — downloads pinned `hermes-agent`, creates pre-built Python venv with all dependencies, bundles PortableGit.
+2. **build-electron-app** (Windows) — clones hermes-agent, `npm ci`, `npm run pack` → unpacked Electron app.
 3. **package-installer** (Windows, tag-only) — pulls all artifacts, runs Inno Setup → `HermesSetup-*.exe`.
-4. **release** — uploads installer + raw layer tarballs to GitHub Releases.
+4. **release** — uploads installer to GitHub Releases.
 
-`ci.yml` runs on PR: hadolint, shellcheck, `tsc --noEmit`, `cargo check`. Both lint steps use `|| true`, so they don't fail the build.
+`ci.yml` runs on PR: validates Inno Setup script, checks PowerShell script syntax.
 
 ## Things That Will Bite You
 
-- **Hardcoded distro name and paths**: `HermesLinux`, `/opt/hermes/scripts/*.sh`, `/opt/hermes/venv/bin/python`. Changing any of these means touching `wsl.rs`, the Dockerfiles, the `wsl-distro/scripts/*`, and `import-distro.ps1` together.
-- **Version pinning lives in CI, not in code**: `AGENT_VERSION` / `WEBUI_VERSION` in `build-release.yml` are the source of truth for what gets shipped. Local builds use whatever is at `${AGENT_SRC}` / `${WEBUI_SRC}`.
-- **Local dev on macOS/Linux can only validate ~70% of the stack**: `cargo check`, `tsc --noEmit`, and Docker rootfs builds work cross-platform; `wsl --import`, the actual Tauri `.exe`, the Inno Setup compile, and the system tray require Windows. See `docs/work_logs/` for the verification matrix.
-- **Layer Dockerfiles assume they only ADD files** — the differential layer logic (`export-differential-layer.sh`) is path-based, so a layer that *modifies* a file already present in core would silently lose its modification. If you ever need to patch a core file from a downstream layer, switch the diff to content-hash-based or restructure to put the change in core.
-- **Health check is just a TCP connect**, not an HTTP probe. `wsl.rs::reqwest_check` currently opens a TCP socket to `127.0.0.1:{port}` and returns success on connect — it constructs the `/health` URL but never fetches it.
+- **Upstream workspace builds**: The Electron app requires `npm ci` from the hermes-agent **repo root** (not `apps/desktop/`). The root `package.json` defines workspaces: `apps/*`, `web`, `ui-tui`.
+- **Version pinning lives in CI, not in code**: `AGENT_VERSION` in `build-release.yml` is the source of truth.
+- **Bootstrap marker format**: The `.hermes-bootstrap-complete` file is JSON with `schemaVersion`, `pinnedCommit`, `pinnedBranch`, `completedAt`, `desktopVersion`. The Electron app validates its schema version and checks for `hermes_cli/main.py` + venv Python.
+- **HERMES_HOME layout**: `%LOCALAPPDATA%\hermes\` with `hermes-agent/` (source + venv), `git/` (PortableGit), `logs/`, `sessions/`, `skills/`.
+- **Electron app resolution order for hermes backend**: `HERMES_DESKTOP_HERMES_ROOT` → dev source → bootstrap-complete install → PATH → pip-installed → bootstrap-needed. Our installer satisfies condition 3 (bootstrap-complete).
+- **Editable vs non-editable pip install**: CI uses non-editable install (`uv pip install .` not `-e .`) because the venv must be relocatable. The hermes-agent source is still bundled for `isHermesSourceRoot()` detection.

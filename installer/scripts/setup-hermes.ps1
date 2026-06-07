@@ -58,22 +58,24 @@ foreach ($d in $dirs) {
 $configFile = Join-Path $HermesHome "config.yaml"
 if (-not (Test-Path $configFile)) {
     Write-Host "  Creating default config.yaml..."
-    @"
+    $configContent = @"
 # Hermes Agent Configuration
 # See https://github.com/NousResearch/hermes-agent for documentation
-"@ | Set-Content -Path $configFile -Encoding UTF8
+"@
+    [System.IO.File]::WriteAllText($configFile, $configContent, [System.Text.UTF8Encoding]::new($false))
 }
 
 $envFile = Join-Path $HermesHome ".env"
 if (-not (Test-Path $envFile)) {
     Write-Host "  Creating default .env..."
-    @"
+    $envContent = @"
 # Hermes Agent Environment Variables
 # Add your API keys and tokens here
 # Example:
 # OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
-"@ | Set-Content -Path $envFile -Encoding UTF8
+"@
+    [System.IO.File]::WriteAllText($envFile, $envContent, [System.Text.UTF8Encoding]::new($false))
 }
 
 # --- Step 5: Write bootstrap-complete marker ---
@@ -102,7 +104,7 @@ $marker = @{
     offlineInstall = $true
 } | ConvertTo-Json -Depth 2
 
-Set-Content -Path $markerPath -Value $marker -Encoding UTF8
+[System.IO.File]::WriteAllText($markerPath, $marker, [System.Text.UTF8Encoding]::new($false))
 
 # --- Step 6: Verify installation ---
 Write-Host "  Verifying installation..."

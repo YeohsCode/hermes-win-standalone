@@ -11,9 +11,36 @@ env:
   AGENT_VERSION: "v2026.6.5"
 
 jobs:
-  build-runtime-bundle:
-    name: Build Runtime Bundle
+  cleanup-artifacts:
+    name: Clean Up Old Artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete all artifacts from previous runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            for (const artifact of artifacts.data.artifacts) {
+              if (artifact.expired) continue;
+              console.log(`Deleting: ${artifact.name} (${(artifact.size_in_bytes / 1024 / 1024).toFixed(1)} MB, run #${artifact.workflow_run.id})`);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
+            console.log(`Cleaned ${artifacts.data.total_count} artifact(s)`);
+
+  build:
+    name: Build & Package
     runs-on: windows-latest
+    needs: [cleanup-artifacts]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,12 +50,18 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install uv
         shell: pwsh
         run: |
           irm https://astral.sh/uv/install.ps1 | iex
           echo "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      # ── Build Runtime Bundle ─────────────────────────────────────────
       - name: Download hermes-agent source
         shell: pwsh
         run: |
@@ -64,7 +97,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path build\runtime-bundle\git | Out-Null
           Start-Process -FilePath .\PortableGit.exe -ArgumentList "-o", "build\runtime-bundle\git", "-y" -Wait
 
-      - name: Verify bundle
+      - name: Verify runtime bundle
         shell: pwsh
         run: |
           $hermesExe = "build\runtime-bundle\hermes-agent\venv\Scripts\hermes.exe"
@@ -84,34 +117,13 @@ jobs:
             exit 1
           }
 
-      - name: Upload runtime bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: runtime-bundle
-          path: build/runtime-bundle
-          retention-days: 1
-          if-no-files-found: error
-
-  build-electron-app:
-    name: Build Electron Desktop App
-    runs-on: windows-latest
-    steps:
-      - name: Checkout hermes-agent
+      # ── Build Electron Desktop App ──────────────────────────────────
+      - name: Checkout hermes-agent (for Electron build)
         uses: actions/checkout@v4
         with:
           repository: NousResearch/hermes-agent
           ref: ${{ env.AGENT_VERSION }}
           path: hermes-agent
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Setup Python (needed for node-pty native build)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
       - name: Install workspace dependencies
         shell: pwsh
@@ -126,48 +138,20 @@ jobs:
           GITHUB_REF_NAME: ${{ env.AGENT_VERSION }}
         run: npm run pack
 
-      - name: Verify Electron app output
+      - name: Stage Electron app for packaging
         shell: pwsh
         run: |
-          $exePath = "hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe"
-          if (Test-Path $exePath) {
-            Write-Host "Hermes.exe found" -ForegroundColor Green
-          } else {
-            Write-Host "ERROR: Hermes.exe not found at $exePath" -ForegroundColor Red
+          $src = "hermes-agent\apps\desktop\release\win-unpacked"
+          if (-not (Test-Path "$src\Hermes.exe")) {
+            Write-Host "ERROR: Hermes.exe not found at $src" -ForegroundColor Red
             Get-ChildItem -Recurse "hermes-agent\apps\desktop\release" -ErrorAction SilentlyContinue | Select-Object -First 20
             exit 1
           }
+          Copy-Item -Recurse $src "build\electron-app"
+          Write-Host "Electron app staged to build\electron-app" -ForegroundColor Green
 
-      - name: Upload Electron app
-        uses: actions/upload-artifact@v4
-        with:
-          name: electron-app
-          path: hermes-agent/apps/desktop/release/win-unpacked
-          retention-days: 1
-          if-no-files-found: error
-
-  package-installer:
-    name: Package Installer
-    runs-on: windows-latest
-    needs: [build-runtime-bundle, build-electron-app]
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download runtime bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: runtime-bundle
-          path: build/runtime-bundle
-
-      - name: Download Electron app
-        uses: actions/download-artifact@v4
-        with:
-          name: electron-app
-          path: build/electron-app
-
-      - name: List artifacts
+      # ── Package Installer (tag push only) ───────────────────────────
+      - name: List build outputs
         shell: pwsh
         run: |
           echo "=== Runtime bundle ==="
@@ -176,6 +160,7 @@ jobs:
           Get-ChildItem build\electron-app | Select-Object Name
 
       - name: Install ChineseSimplified language file
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $dest = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
@@ -185,11 +170,13 @@ jobs:
           Write-Host "Installed: $dest ($((Get-Item $dest).Length) bytes)"
 
       - name: Build installer with Inno Setup
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
         with:
           path: installer/hermes-win.iss
 
       - name: Upload installer
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: hermes-installer
@@ -199,7 +186,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [package-installer]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write

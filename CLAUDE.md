@@ -13,10 +13,12 @@ The upstream `AGENT_VERSION` is pinned in `.github/workflows/build-release.yml`.
 ## Architecture
 
 ```
-CI Pipeline
-├─ build-runtime-bundle    → Python venv + hermes-agent + PortableGit
-├─ build-electron-app      → Electron Desktop App (unpacked)
-└─ package-installer       → Inno Setup → HermesSetup-x.x.x.exe
+CI Pipeline (single Windows runner)
+├─ cleanup-artifacts       → Delete old artifacts to stay within quota
+├─ build & package         → Python venv + hermes-agent + PortableGit
+│   ├─ runtime bundle        + Electron Desktop App (unpacked)
+│   └─ Inno Setup            → HermesSetup-x.x.x.exe (tag-only)
+└─ release                 → Upload installer to GitHub Releases (tag-only)
 
 User Install (offline, single .exe)
 ├─ Electron Desktop App    → {app}\
@@ -49,10 +51,9 @@ iscc installer/hermes-win.iss
 ## Release Flow
 
 Pushing a `v*` tag triggers `.github/workflows/build-release.yml`:
-1. **build-runtime-bundle** (Windows) — downloads pinned `hermes-agent`, creates pre-built Python venv with all dependencies, bundles PortableGit.
-2. **build-electron-app** (Windows) — clones hermes-agent, `npm ci`, `npm run pack` → unpacked Electron app.
-3. **package-installer** (Windows, tag-only) — pulls all artifacts, runs Inno Setup → `HermesSetup-*.exe`.
-4. **release** — uploads installer to GitHub Releases.
+1. **cleanup-artifacts** (Ubuntu) — deletes all old artifacts to stay within GitHub storage quota.
+2. **build** (Windows) — single job that builds runtime bundle (Python venv + hermes-agent + PortableGit) and Electron app, then packages them into `HermesSetup-*.exe` via Inno Setup (packaging step is tag-only). No intermediate artifacts are uploaded; only the final installer is uploaded.
+3. **release** (Ubuntu, tag-only) — downloads installer artifact and publishes to GitHub Releases.
 
 `ci.yml` runs on PR: validates Inno Setup script, checks PowerShell script syntax.
 

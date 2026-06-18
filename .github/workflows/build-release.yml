@@ -8,7 +8,9 @@ on:
     branches: [main]
 
 env:
-  AGENT_VERSION: "v2026.6.5"
+  # Pinned to main@2026-06-18 for port-0 ephemeral fix (1e25358) + PTY dispose (92e6d8c).
+  # No official tag exists yet after v2026.6.5; revert to a tag once upstream cuts one.
+  AGENT_VERSION: "58ad694"
 
 jobs:
   cleanup-artifacts:
@@ -65,7 +67,7 @@ jobs:
       - name: Download hermes-agent source
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/NousResearch/hermes-agent/archive/refs/tags/${{ env.AGENT_VERSION }}.tar.gz" -OutFile agent.tar.gz
+          Invoke-WebRequest -Uri "https://github.com/NousResearch/hermes-agent/archive/${{ env.AGENT_VERSION }}.tar.gz" -OutFile agent.tar.gz
           New-Item -ItemType Directory -Force -Path build\hermes-src | Out-Null
           tar xzf agent.tar.gz -C build\hermes-src
           Move-Item build\hermes-src\hermes-agent-* build\hermes-src\hermes-agent

@@ -62,8 +62,14 @@ if ($Clean) {
 Write-Step "Checking prerequisites"
 
 Assert-Command "python" "Python"
-$pyVer = python --version 2>&1
-Write-Ok "Python: $pyVer"
+# 用 uv python find 拿绝对路径(避免 PATH 里 Scripts\python.exe 相对路径 home 解析失败)
+# uv 0.11.19+ 的语法: uv python find <REQUEST> (positional), --system 强制用系统 Python
+$pyBin = & uv python find --system 3.11 2>&1 | Where-Object { $_ -match '\.exe$' } | Select-Object -First 1
+if (-not $pyBin -or -not (Test-Path $pyBin)) {
+    throw "Python 3.11 not found via 'uv python find --system 3.11'. Install via 'uv python install 3.11' or winget."
+}
+$pyVer = & $pyBin --version 2>&1
+Write-Ok "Python: $pyVer (at $pyBin)"
 
 Assert-Command "node" "Node.js"
 $nodeVer = node --version 2>&1
@@ -151,7 +157,24 @@ if (-not $SkipRuntime) {
     if (Test-Path $hermesSrcDir) { Remove-Item -Recurse -Force $hermesSrcDir }
     New-Item -ItemType Directory -Force -Path $hermesSrcDir | Out-Null
     Write-Host "  Extracting source..."
-    tar xzf $tarball -C $hermesSrcDir
+    # 用 Expand-Archive 替代 tar (PowerShell 原生,跨 shell 一致,避免 MSYS tar 路径问题)
+    # Expand-Archive 不支持 .tar.gz,先用 .NET 解 gzip + tar
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $tarballStream = [System.IO.File]::OpenRead($tarball)
+    $gzipStream = New-Object System.IO.Compression.GzipStream($tarballStream, [System.IO.Compression.CompressionMode]::Decompress)
+    $tarStream = [System.IO.File]::Create("$BuildDir\agent.tar")
+    $gzipStream.CopyTo($tarStream)
+    $gzipStream.Close(); $tarStream.Close(); $tarballStream.Close()
+    # 现在 agent.tar 是未压缩的 tar, 用 tar 展开 (PowerShell 调用 MSYS tar 但传 MSYS 路径)
+    $msysTarPath = "C:\Program Files\Git\usr\bin\tar.exe"
+    if (Test-Path $msysTarPath) {
+        # 用 MSYS 风格路径
+        & $msysTarPath xf "$BuildDir\agent.tar" -C ((Get-Location).Path + "\" + $hermesSrcDir)
+    } else {
+        # fallback: 用 PowerShell tar
+        tar xf "$BuildDir\agent.tar" -C $hermesSrcDir
+    }
+    Remove-Item "$BuildDir\agent.tar" -Force
     $extracted = Get-ChildItem $hermesSrcDir | Where-Object { $_.PSIsContainer } | Select-Object -First 1
     if ($extracted.Name -ne "hermes-agent") {
         Rename-Item $extracted.FullName "hermes-agent"
@@ -185,6 +208,68 @@ if (-not $SkipRuntime) {
     } else {
         throw "hermes.exe not found at $hermesExe after install"
     }
+
+    # ─── Embed Python interpreter for portable venv (v3.0.1+) ───
+    # 背景: uv venv 把绝对路径烤进 pyvenv.cfg (home = C:\Users\<build-machine>\...)
+    #      装到其他机器上 hermes.exe 找不到 Python 报错 (No Python at...)
+    # 修法: 把 uv 用的 Python 解释器整个复制进 venv\python\,改 home = python (相对)
+    #       这样 venv 变成 self-contained,任何机器拷过去都能跑
+    Write-Step "Embedding Python interpreter for portable venv"
+
+    $pythonExe = & uv python find --system 3.11 2>&1 | Where-Object { $_ -match '\.exe$' } | Select-Object -First 1
+    if (-not $pythonExe -or -not (Test-Path $pythonExe)) {
+        throw "Could not find Python 3.11 via 'uv python find --system 3.11'"
+    }
+    $pythonHome = Split-Path -Parent $pythonExe
+    Write-Host "  Source Python: $pythonExe"
+
+    $embeddedDir = Join-Path $targetRoot "venv\python"
+    if (Test-Path $embeddedDir) { Remove-Item -Recurse -Force $embeddedDir }
+    New-Item -ItemType Directory -Force -Path $embeddedDir | Out-Null
+
+    # 1) Python 主可执行 + 主 DLL
+    foreach ($f in @("python.exe", "pythonw.exe", "python3.dll", "python311.dll", "vcruntime140.dll", "vcruntime140_1.dll")) {
+        $src = Join-Path $pythonHome $f
+        if (Test-Path $src) { Copy-Item $src $embeddedDir -Force }
+    }
+    # 2) 顶层 .pyd 扩展模块(罕见但有)
+    Get-ChildItem -Path $pythonHome -Filter "*.pyd" -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item $_.FullName $embeddedDir -Force
+    }
+    # 3) DLLs/ 子目录(39+ 个 stdlib 扩展模块)
+    if (Test-Path (Join-Path $pythonHome "DLLs")) {
+        Copy-Item -Recurse -Force (Join-Path $pythonHome "DLLs") (Join-Path $embeddedDir "DLLs")
+    }
+    # 4) Lib/ (stdlib) - 排除 site-packages 避免打包机的用户包污染 venv
+    $libSrc = Join-Path $pythonHome "Lib"
+    if (Test-Path $libSrc) {
+        $libDst = Join-Path $embeddedDir "Lib"
+        # robocopy: /E 复制子目录(含空),/XD 排除 site-packages,/NFL /NDL /NJH /NJS /NP 静默
+        $robocopyResult = robocopy $libSrc $libDst /E /XD site-packages /NFL /NDL /NJH /NJS /NP /R:0 /W:0
+        # robocopy exit code 0-7 都算成功,8+ 才是错误
+        if ($robocopyResult -ge 8) {
+            throw "robocopy failed with exit code $robocopyResult copying $libSrc -> $libDst"
+        }
+    }
+    # 5) tcl/ (tkinter 用,hermes TTS 可能会用)
+    if (Test-Path (Join-Path $pythonHome "tcl")) {
+        Copy-Item -Recurse -Force (Join-Path $pythonHome "tcl") (Join-Path $embeddedDir "tcl")
+    }
+
+    # 6) 改 pyvenv.cfg: home = python (相对路径,相对于 venv/ 目录)
+    $pyvenvCfg = Join-Path $targetRoot "venv\pyvenv.cfg"
+    $cfgContent = Get-Content $pyvenvCfg
+    $newCfg = $cfgContent -replace '^(\s*home\s*=\s*).*$', '$1python'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($pyvenvCfg, ($newCfg -join "`r`n"), $utf8NoBom)
+
+    # 验证一下
+    $embeddedPython = Join-Path $embeddedDir "python.exe"
+    if (Test-Path $embeddedPython) {
+        $verCheck = & $embeddedPython --version 2>&1
+        Write-Ok "Embedded Python: $verCheck"
+    }
+    Write-Ok "pyvenv.cfg updated: home = python (relative)"
 
     $mainPy = Join-Path $targetRoot "hermes_cli\main.py"
     if (Test-Path $mainPy) {

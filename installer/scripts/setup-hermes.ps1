@@ -19,6 +19,67 @@ $GitCmdDir = Join-Path $GitDir "cmd"
 
 Write-Host "Configuring Hermes Agent..." -ForegroundColor Yellow
 
+# --- Step 0: Fix venv pyvenv.cfg for portable venv (v3.0.1+) ---
+# Build writes `home = python` (relative, points to venv\python\ embedded interpreter).
+# That works for hermes.exe, but Scripts\python.exe launcher (a copy of base Python.exe)
+# only resolves `home` relative to CWD, not the venv location. So when user runs
+# `python` from any non-venv CWD, the launcher fails with "No Python at 'python\python.exe'".
+# Fix: rewrite `home` to the absolute embedded-Python path so it works from anywhere.
+Write-Host "  Patching venv pyvenv.cfg (portable home path)..."
+$VenvRoot = Join-Path $AgentRoot "venv"
+$pyvenvCfg = Join-Path $VenvRoot "pyvenv.cfg"
+$embeddedPyDir = Join-Path $VenvRoot "python"
+if (Test-Path $pyvenvCfg) {
+    $cfgLines = Get-Content $pyvenvCfg
+    $newCfg = $cfgLines -replace '^(\s*home\s*=\s*).*$', ('$1' + $embeddedPyDir)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($pyvenvCfg, ($newCfg -join "`r`n"), $utf8NoBom)
+    Write-Host "    pyvenv.cfg home -> $embeddedPyDir" -ForegroundColor Gray
+} else {
+    Write-Host "    pyvenv.cfg not found at $pyvenvCfg (skipped)" -ForegroundColor Yellow
+}
+
+# --- Step 0b: Relocate uv script launchers (binary path patching) ---
+# uv embeds absolute Python paths in console-script .exe trampolines.
+# Replace the build-time venv path with the install-time path so hermes.exe
+# and friends find python.exe at the new location.
+$buildPathMarker = Join-Path $VenvRoot ".build-path"
+if (Test-Path $buildPathMarker) {
+    $buildVenvPath = (Get-Content $buildPathMarker -Raw).Trim()
+    $targetVenvPath = $VenvRoot
+    if ($buildVenvPath -ne $targetVenvPath) {
+        Write-Host "  Relocating venv script launchers..."
+        Write-Host "    from: $buildVenvPath" -ForegroundColor Gray
+        Write-Host "    to:   $targetVenvPath" -ForegroundColor Gray
+        $buildBytes = [System.Text.Encoding]::UTF8.GetBytes($buildVenvPath)
+        $targetBytes = [System.Text.Encoding]::UTF8.GetBytes($targetVenvPath)
+        # Pad target with NULs if shorter than build path so the exe size stays the same
+        if ($targetBytes.Length -lt $buildBytes.Length) {
+            $padded = New-Object byte[] $buildBytes.Length
+            [Array]::Copy($targetBytes, $padded, $targetBytes.Length)
+            $targetBytes = $padded
+        }
+        $patched = 0
+        Get-ChildItem (Join-Path $VenvRoot "Scripts\*.exe") | ForEach-Object {
+            if ($_.Name -match '^(python|pythonw|python3)\.exe$') { return }
+            $raw = [System.IO.File]::ReadAllBytes($_.FullName)
+            $rawStr = [System.Text.Encoding]::UTF8.GetString($raw)
+            if ($rawStr.Contains($buildVenvPath)) {
+                $newStr = $rawStr.Replace($buildVenvPath, $targetVenvPath)
+                $newBytes = [System.Text.Encoding]::UTF8.GetBytes($newStr)
+                [System.IO.File]::WriteAllBytes($_.FullName, $newBytes)
+                $patched++
+            }
+        }
+        Write-Host "    Patched $patched script launchers" -ForegroundColor Gray
+    } else {
+        Write-Host "  Venv paths match build-time path (no relocation needed)"
+    }
+    Remove-Item $buildPathMarker -Force -ErrorAction SilentlyContinue
+} else {
+    Write-Host "  No .build-path marker found (skipping launcher relocation)" -ForegroundColor Yellow
+}
+
 # --- Step 1: Set HERMES_HOME ---
 Write-Host "  Setting HERMES_HOME..."
 [Environment]::SetEnvironmentVariable("HERMES_HOME", $HermesHome, "User")

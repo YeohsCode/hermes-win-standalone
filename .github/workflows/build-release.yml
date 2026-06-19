@@ -91,6 +91,33 @@ jobs:
             "$installSpec" `
             --no-cache-dir
 
+      - name: Bundle Python stdlib into venv for relocatability
+        shell: pwsh
+        run: |
+          $venvPython = "build\runtime-bundle\hermes-agent\venv\python\python.exe"
+          # Find where base Python's stdlib lives
+          $basePrefix = & $venvPython -c "import sys; print(sys.base_prefix)" 2>$null
+          $srcLib = Join-Path $basePrefix "Lib"
+          $dstLib = "build\runtime-bundle\hermes-agent\venv\python\Lib"
+          if (-not (Test-Path $srcLib)) {
+            Write-Error "Python stdlib not found at $srcLib"
+            exit 1
+          }
+          Write-Host "Copying stdlib from $srcLib to $dstLib"
+          Copy-Item -Recurse -Force $srcLib $dstLib
+          # Remove bloat: test suites, caches, site-packages, tkinter, etc.
+          $remove = @("test","tests","site-packages","tkinter","turtledemo","idlelib",
+                      "lib2to3","ensurepip","distutils","venv","pydoc_data")
+          foreach ($d in $remove) {
+            $p = Join-Path $dstLib $d
+            if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+          }
+          Get-ChildItem -Recurse -Directory -Filter "__pycache__" $dstLib |
+            Remove-Item -Recurse -Force
+          $mb = [math]::Round((Get-ChildItem -Recurse $dstLib -File |
+            Measure-Object -Property Length -Sum).Sum / 1MB, 1)
+          Write-Host "Stdlib size: $mb MB"
+
       - name: Install PortableGit
         shell: pwsh
         run: |
@@ -153,6 +180,14 @@ jobs:
           Write-Host "Electron app staged to build\electron-app" -ForegroundColor Green
 
       # ── Package Installer (tag push only) ───────────────────────────
+      - name: Record build-time venv path for post-install relocation
+        shell: pwsh
+        run: |
+          $venvRoot = (Resolve-Path "build\runtime-bundle\hermes-agent\venv").Path
+          $marker = Join-Path $venvRoot ".build-path"
+          [System.IO.File]::WriteAllText($marker, $venvRoot, [System.Text.UTF8Encoding]::new($false))
+          Write-Host "Recorded build-time venv path: $venvRoot"
+
       - name: Strip bloat from runtime bundle
         shell: pwsh
         run: |

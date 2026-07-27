@@ -11,11 +11,11 @@
 #   .\scripts\build-local.ps1 -SkipElectron       # skip Electron app build
 #   .\scripts\build-local.ps1 -SkipRuntime        # skip runtime bundle build
 #   .\scripts\build-local.ps1 -SkipInstaller      # skip Inno Setup packaging
-#   .\scripts\build-local.ps1 -AgentVersion v2026.6.5  # override agent version
+#   .\scripts\build-local.ps1 -AgentVersion v2026.7.20  # override agent version
 #   .\scripts\build-local.ps1 -ElectronMirror "https://npmmirror.com/mirrors/electron/"
 
 param(
-    [string]$AgentVersion = "v2026.6.5",
+    [string]$AgentVersion = "v2026.7.20",
     [string]$ElectronMirror = "https://npmmirror.com/mirrors/electron/",
     [switch]$SkipRuntime,
     [switch]$SkipElectron,

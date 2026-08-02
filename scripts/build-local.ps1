@@ -15,7 +15,7 @@
 #   .\scripts\build-local.ps1 -ElectronMirror "https://npmmirror.com/mirrors/electron/"
 
 param(
-    [string]$AgentVersion = "v2026.6.5",
+    [string]$AgentVersion = "v2026.7.30",
     [string]$ElectronMirror = "https://npmmirror.com/mirrors/electron/",
     [switch]$SkipRuntime,
     [switch]$SkipElectron,
@@ -157,25 +157,25 @@ if (-not $SkipRuntime) {
     if (Test-Path $hermesSrcDir) { Remove-Item -Recurse -Force $hermesSrcDir }
     New-Item -ItemType Directory -Force -Path $hermesSrcDir | Out-Null
     Write-Host "  Extracting source..."
-    # 用 Expand-Archive 替代 tar (PowerShell 原生,跨 shell 一致,避免 MSYS tar 路径问题)
-    # Expand-Archive 不支持 .tar.gz,先用 .NET 解 gzip + tar
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $tarballStream = [System.IO.File]::OpenRead($tarball)
     $gzipStream = New-Object System.IO.Compression.GzipStream($tarballStream, [System.IO.Compression.CompressionMode]::Decompress)
     $tarStream = [System.IO.File]::Create("$BuildDir\agent.tar")
     $gzipStream.CopyTo($tarStream)
     $gzipStream.Close(); $tarStream.Close(); $tarballStream.Close()
-    # 现在 agent.tar 是未压缩的 tar, 用 tar 展开 (PowerShell 调用 MSYS tar 但传 MSYS 路径)
-    $msysTarPath = "C:\Program Files\Git\usr\bin\tar.exe"
-    if (Test-Path $msysTarPath) {
-        # 用 MSYS 风格路径
-        & $msysTarPath xf "$BuildDir\agent.tar" -C ((Get-Location).Path + "\" + $hermesSrcDir)
+    # Use Windows native tar (available since Win10 1803) — MSYS tar misinterprets drive letters as remote hosts
+    $winTar = "$env:SystemRoot\System32\tar.exe"
+    $tarFile = Join-Path $BuildDir "agent.tar"
+    $extractDest = (Resolve-Path $hermesSrcDir).Path
+    if (Test-Path $winTar) {
+        & $winTar xf $tarFile -C $extractDest
     } else {
-        # fallback: 用 PowerShell tar
-        tar xf "$BuildDir\agent.tar" -C $hermesSrcDir
+        tar xf $tarFile -C $extractDest
     }
-    Remove-Item "$BuildDir\agent.tar" -Force
+    if ($LASTEXITCODE -ne 0) { throw "tar extraction failed with exit code $LASTEXITCODE" }
+    Remove-Item $tarFile -Force
     $extracted = Get-ChildItem $hermesSrcDir | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+    if (-not $extracted) { throw "No directory found after extraction in $hermesSrcDir" }
     if ($extracted.Name -ne "hermes-agent") {
         Rename-Item $extracted.FullName "hermes-agent"
     }
@@ -195,9 +195,11 @@ if (-not $SkipRuntime) {
 
     Write-Host "  Installing hermes-agent (this may take several minutes)..."
     $installSpec = "${targetRoot}[all,web]"
+    $env:HERMES_NIX_BUILD = "1"
     uv pip install --python (Join-Path $targetRoot "venv\Scripts\python.exe") `
         $installSpec `
         --no-cache-dir
+    Remove-Item Env:\HERMES_NIX_BUILD -ErrorAction SilentlyContinue
     Write-Ok "Installed hermes-agent"
 
     # Verify
@@ -278,6 +280,20 @@ if (-not $SkipRuntime) {
         throw "hermes_cli/main.py not found — source root detection will fail"
     }
 
+    # Strip bloat that creates paths exceeding Windows MAX_PATH (260 chars)
+    $discoveryCacheDir = Join-Path $targetRoot "venv\Lib\site-packages\googleapiclient\discovery_cache\documents"
+    if (Test-Path $discoveryCacheDir) {
+        $count = (Get-ChildItem -Recurse $discoveryCacheDir -File).Count
+        Remove-Item -Recurse -Force $discoveryCacheDir
+        Write-Ok "Removed $count discovery cache files (MAX_PATH workaround)"
+    }
+
+    # Record build-time venv path for post-install relocation
+    $venvRootAbs = (Resolve-Path (Join-Path $targetRoot "venv")).Path
+    $buildPathMarker = Join-Path $venvRootAbs ".build-path"
+    [System.IO.File]::WriteAllText($buildPathMarker, $venvRootAbs, [System.Text.UTF8Encoding]::new($false))
+    Write-Ok "Recorded build-time venv path: $venvRootAbs"
+
     # Download PortableGit
     $gitDir = Join-Path $runtimeDir "git"
     if (-not (Test-Path (Join-Path $gitDir "bin\git.exe"))) {
@@ -335,17 +351,22 @@ if (-not $SkipElectron) {
     Write-Host "  Installing npm workspace dependencies..."
     Push-Location $electronSrcDir
     try {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         # Prefer npm ci for deterministic builds; fall back to npm install if lockfile is stale
-        try {
-            npm ci 2>&1 | ForEach-Object { Write-Host "    $_" }
-            if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
-            Write-Ok "npm ci complete"
-        } catch {
-            Write-Warn "npm ci failed, falling back to npm install..."
-            npm install 2>&1 | ForEach-Object { Write-Host "    $_" }
-            if ($LASTEXITCODE -ne 0) { throw "npm install also failed" }
+        npm ci 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host "    [stderr] $_" } else { Write-Host "    $_" } }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "npm ci failed (exit $LASTEXITCODE), falling back to npm install..."
+            npm install 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host "    [stderr] $_" } else { Write-Host "    $_" } }
+            if ($LASTEXITCODE -ne 0) {
+                $ErrorActionPreference = $prevEAP
+                throw "npm install also failed with exit code $LASTEXITCODE"
+            }
             Write-Ok "npm install complete"
+        } else {
+            Write-Ok "npm ci complete"
         }
+        $ErrorActionPreference = $prevEAP
     } finally {
         Pop-Location
     }
@@ -356,8 +377,11 @@ if (-not $SkipElectron) {
     try {
         $env:GITHUB_SHA = "local-build"
         $env:GITHUB_REF_NAME = $AgentVersion
-        npm run pack 2>&1 | ForEach-Object { Write-Host "    $_" }
-        if ($LASTEXITCODE -ne 0) { throw "npm run pack failed" }
+        $prevEAP2 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        npm run pack 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host "    [stderr] $_" } else { Write-Host "    $_" } }
+        $ErrorActionPreference = $prevEAP2
+        if ($LASTEXITCODE -ne 0) { throw "npm run pack failed with exit code $LASTEXITCODE" }
         Write-Ok "Electron app built"
     } finally {
         Pop-Location

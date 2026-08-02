@@ -3,7 +3,7 @@
 ; for fully offline installation on Windows.
 
 #define MyAppName "Hermes"
-#define MyAppVersion "3.0.2"
+#define MyAppVersion "0.19.1"
 #define MyAppPublisher "Hermes"
 #define MyAppURL "https://github.com/NousResearch/hermes-agent"
 #define MyAppExeName "Hermes.exe"
